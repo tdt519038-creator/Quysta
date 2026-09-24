@@ -1,0 +1,415 @@
+--[[
+================================================================
+  QUY OUTFIT - SERVER  (Script thuong, KHONG phai LocalScript)
+----------------------------------------------------------------
+  DAT: ServerScriptService  (ten tuy y, vd "OutfitServer")
+
+  Lam gi:
+   - Nhan yeu cau thu do tu client (LocalScript quyAuto_CLIENT)
+   - Mac do len nhan vat NGAY TREN SERVER => tat ca nguoi choi deu thay
+   - Nho bo do dang thu cua tung nguoi, hoi sinh xong mac lai
+   - Kiem tra du lieu client gui len + gioi han toc do (chong spam)
+   - Nhap ten nguoi choi dang trong server => copy dung bo ho DANG MAC
+     (de nguoi choi khoe do roi nguoi khac copy / mua)
+================================================================
+--]]
+
+local Players            = game:GetService("Players")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local MarketplaceService = game:GetService("MarketplaceService")
+local InsertService      = game:GetService("InsertService")
+
+local CONFIG = {
+    RemoteName    = "QuyOutfitRemote",   -- phai trung voi CLIENT
+    Cooldown      = 0.6,                 -- giay toi thieu giua 2 yeu cau cua 1 nguoi
+    KeepOnRespawn = true,                -- hoi sinh xong tu mac lai do dang thu
+}
+
+local remote = ReplicatedStorage:FindFirstChild(CONFIG.RemoteName)
+if not remote then
+    remote = Instance.new("RemoteFunction")
+    remote.Name = CONFIG.RemoteName
+    remote.Parent = ReplicatedStorage
+end
+
+-- trang thai theo tung nguoi choi
+local original = {}   -- [player] = HumanoidDescription luc chua thu gi
+local current  = {}   -- [player] = HumanoidDescription dang thu
+local modified = {}   -- [player] = true neu da thu do
+local busy     = {}
+local lastUse  = {}
+local typeCache = {}  -- [assetId] = AssetTypeId
+local forced    = {}  -- [player] = { [tenLoai] = assetId }  (do xep lop CUONG EP hien)
+local assetCache = {} -- [assetId] = Accessory mau (tai bang InsertService)
+
+local FORCE_ATTR = "QuyForced"
+
+-- ============================================================
+-- BANG TRA LOAI DO
+-- ============================================================
+-- AssetTypeId -> ten Enum.AccessoryType
+local ACC_TYPES = {
+    [8]  = "Hat",  [41] = "Hair", [42] = "Face", [43] = "Neck", [44] = "Shoulder",
+    [45] = "Front", [46] = "Back", [47] = "Waist",
+    [64] = "TShirt", [65] = "Shirt", [66] = "Pants", [67] = "Jacket", [68] = "Sweater",
+    [69] = "Shorts", [70] = "LeftShoe", [71] = "RightShoe", [72] = "DressSkirt",
+    [76] = "Eyebrow", [77] = "Eyelash",
+}
+-- do xep lop (layered clothing)
+local LAYERED = { [64]=true, [65]=true, [66]=true, [67]=true, [68]=true,
+                  [69]=true, [70]=true, [71]=true, [72]=true }
+-- AssetTypeId -> thuoc tinh HumanoidDescription (do co dien + bo phan co the)
+local DESC_PROPS = {
+    [2] = "GraphicTShirt", [11] = "Shirt", [12] = "Pants", [18] = "Face",
+    [17] = "Head", [79] = "Head", [27] = "Torso",
+    [28] = "RightArm", [29] = "LeftArm", [30] = "LeftLeg", [31] = "RightLeg",
+}
+
+-- ============================================================
+-- HAM TIEN ICH
+-- ============================================================
+local function getHumanoid(player)
+    local c = player.Character
+    return c and c:FindFirstChildOfClass("Humanoid") or nil
+end
+
+local function assetTypeId(id)
+    local c = typeCache[id]
+    if c then return c end
+    local ok, info = pcall(function()
+        return MarketplaceService:GetProductInfo(id, Enum.InfoType.Asset)
+    end)
+    if ok and info and info.AssetTypeId then
+        typeCache[id] = info.AssetTypeId
+        return info.AssetTypeId
+    end
+    return nil
+end
+
+-- them 1 asset vao description; true = mon nay mac thu duoc
+local function addAsset(desc, id)
+    local t = assetTypeId(id)
+    if not t then return false end
+
+    local prop = DESC_PROPS[t]
+    if prop then
+        desc[prop] = id
+        return true
+    end
+
+    local accName = ACC_TYPES[t]
+    if accName then
+        local accType = Enum.AccessoryType[accName]
+        local list, maxOrder = {}, 0
+        for _, a in ipairs(desc:GetAccessories(true)) do
+            if a.AccessoryType ~= accType then list[#list + 1] = a end
+            maxOrder = math.max(maxOrder, a.Order or 0)
+        end
+        list[#list + 1] = {
+            Order = maxOrder + 1,
+            AssetId = id,
+            AccessoryType = accType,
+            IsLayered = LAYERED[t] or false,
+        }
+        desc:SetAccessories(list, true)
+        return true
+    end
+    return false
+end
+
+-- bo nhan vat (Bundle): mac tung asset trong bo
+local function addBundle(desc, bundleId)
+    local ok, info = pcall(function()
+        return MarketplaceService:GetProductInfo(bundleId, Enum.InfoType.Bundle)
+    end)
+    if not ok or not info or not info.Items then return false end
+    local any = false
+    for _, it in ipairs(info.Items) do
+        if it.Type == "Asset" and addAsset(desc, it.Id) then any = true end
+    end
+    if not any then   -- du phong: lay tu outfit cua bo
+        for _, it in ipairs(info.Items) do
+            if it.Type == "UserOutfit" then
+                local ok2, d = pcall(function()
+                    return Players:GetHumanoidDescriptionFromOutfitId(it.Id)
+                end)
+                if ok2 and d then
+                    for _, p in ipairs({ "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg" }) do
+                        desc[p] = d[p]
+                    end
+                    any = true
+                end
+            end
+        end
+    end
+    return any
+end
+
+-- ------------------------------------------------------------
+-- CUONG EP HIEN PHU KIEN XEP LOP (ao khoac, ao len, quan, giay...)
+-- Game chan layered clothing => ApplyDescription bo qua chung.
+-- Ta tach chung ra khoi HumanoidDescription, tu tai bang InsertService
+-- roi gan thang vao nhan vat tren SERVER => ai cung thay.
+-- ------------------------------------------------------------
+local function getTemplate(id)
+    local t = assetCache[id]
+    if t then return t end
+    local ok, model = pcall(function() return InsertService:LoadAsset(id) end)
+    if not ok or not model then
+        warn("[QuyOutfit] LoadAsset that bai:", id, model)
+        return nil
+    end
+    local acc = model:FindFirstChildOfClass("Accessory")
+    if not acc then model:Destroy() return nil end
+    acc.Parent = nil
+    model:Destroy()
+    assetCache[id] = acc
+    return acc
+end
+
+local function attachForced(player)
+    local char = player.Character
+    local hum = getHumanoid(player)
+    if not char or not hum or hum.Health <= 0 then return end
+    -- go do cuong ep cu
+    for _, c in ipairs(char:GetChildren()) do
+        if c:IsA("Accessory") and c:GetAttribute(FORCE_ATTR) then c:Destroy() end
+    end
+    local list = forced[player]
+    if not list then return end
+    for _, id in pairs(list) do
+        local tpl = getTemplate(id)
+        if tpl and player.Character == char then
+            local a = tpl:Clone()
+            a:SetAttribute(FORCE_ATTR, true)
+            pcall(function() hum:AddAccessory(a) end)
+        end
+    end
+end
+
+-- tach do xep lop ra khoi desc, dua vao forced[player]
+-- replaceAll = true: xoa het do cuong ep cu truoc (dung khi copy/reset)
+local function extractLayered(player, desc, replaceAll)
+    if replaceAll or not forced[player] then forced[player] = {} end
+    local keep = {}
+    for _, a in ipairs(desc:GetAccessories(true)) do
+        if a.IsLayered and a.AssetId and a.AssetId > 0 then
+            forced[player][a.AccessoryType.Name] = a.AssetId
+        else
+            keep[#keep + 1] = a
+        end
+    end
+    desc:SetAccessories(keep, true)
+end
+
+local function applyDesc(player, desc, reset)
+    local hum = getHumanoid(player)
+    if not hum or hum.Health <= 0 then return false end
+    local ok = pcall(function()
+        if reset then
+            hum:ApplyDescriptionReset(desc)
+        else
+            hum:ApplyDescription(desc)
+        end
+    end)
+    if ok then attachForced(player) end   -- ApplyDescription xoa phu kien la => gan lai
+    return ok
+end
+
+local function ensureBase(player)
+    local hum = getHumanoid(player)
+    if not hum then return false end
+    if not original[player] then
+        local ok, d = pcall(function() return hum:GetAppliedDescription() end)
+        if not ok or not d then
+            ok, d = pcall(function()
+                return Players:GetHumanoidDescriptionFromUserId(player.UserId)
+            end)
+        end
+        if not ok or not d then return false end
+        original[player] = d
+    end
+    if not current[player] then current[player] = original[player]:Clone() end
+    return true
+end
+
+-- ============================================================
+-- XU LY YEU CAU (tra ve: ok, thongDiepHoacMaLoi)
+-- ============================================================
+local function handleTry(player, payload)
+    if type(payload) ~= "table" then return false, "invalid" end
+    local id, itemType = payload.Id, payload.ItemType
+    if type(id) ~= "number" or id ~= math.floor(id) or id <= 0 or id > 1e15 then
+        return false, "invalid"
+    end
+    if itemType ~= "Asset" and itemType ~= "Bundle" then return false, "invalid" end
+    if not ensureBase(player) then return false, "nochar" end
+
+    local desc = current[player]:Clone()
+    local added
+    if itemType == "Bundle" then
+        added = addBundle(desc, id)
+    else
+        added = addAsset(desc, id)
+    end
+    if not added then return false, "unsupported" end
+
+    local backup = {}
+    for k, v in pairs(forced[player] or {}) do backup[k] = v end
+    extractLayered(player, desc, false)   -- do xep lop -> cuong ep hien
+    if not applyDesc(player, desc) then
+        forced[player] = backup
+        return false, "apply"
+    end
+
+    current[player] = desc
+    modified[player] = true
+    return true
+end
+
+local function handleUser(player, name)
+    if type(name) ~= "string" then return false, "invalid" end
+    name = name:match("^%s*(.-)%s*$")
+    if #name < 1 or #name > 40 then return false, "invalid" end
+    if not ensureBase(player) then return false, "nochar" end
+
+    local desc, srcPlayer
+    -- nguoi dang trong server: copy dung bo ho DANG MAC (ke ca do dang thu)
+    local lname = name:lower()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and (p.Name:lower() == lname or p.DisplayName:lower() == lname) then
+            local h = getHumanoid(p)
+            if h then
+                local ok, d = pcall(function() return h:GetAppliedDescription() end)
+                if ok and d then desc = d; srcPlayer = p end
+            end
+            break
+        end
+    end
+    -- khong co trong server: lay avatar da luu cua tai khoan do
+    if not desc then
+        local ok, uid = pcall(function() return Players:GetUserIdFromNameAsync(name) end)
+        if not ok then return false, "notfound" end
+        local ok2, d = pcall(function() return Players:GetHumanoidDescriptionFromUserId(uid) end)
+        if not ok2 or not d then return false, "notfound" end
+        desc = d
+    end
+
+    local backup = {}
+    for k, v in pairs(forced[player] or {}) do backup[k] = v end
+    extractLayered(player, desc, true)    -- copy nguyen bo: thay het do xep lop cu
+    if srcPlayer and forced[srcPlayer] then
+        for slot, id in pairs(forced[srcPlayer]) do forced[player][slot] = id end
+    end
+
+    if not applyDesc(player, desc, true) then
+        forced[player] = backup
+        return false, "apply"
+    end
+    current[player] = desc:Clone()
+    modified[player] = true
+    return true, name
+end
+
+local function handleReset(player)
+    if not original[player] then return false, "nothing" end
+    local desc = original[player]:Clone()
+    extractLayered(player, desc, true)    -- do xep lop goc (neu co) van duoc giu
+    if not applyDesc(player, desc, true) then return false, "apply" end
+    current[player] = desc:Clone()
+    modified[player] = nil
+    return true
+end
+
+-- ============================================================
+-- TIM DO BANG ID HOAC LIEN KET
+-- Nhan: "123456", roblox.com/catalog/123456/ten, roblox.com/bundles/789/ten,
+--       roblox.com/Item.aspx?ID=123456, rbxassetid://123456 ...
+-- ============================================================
+local function parseInput(text)
+    if type(text) ~= "string" or #text > 300 then return nil end
+    text = text:match("^%s*(.-)%s*$")
+
+    local function num(s)
+        if s and #s <= 15 then return tonumber(s) end
+    end
+
+    local n = num(text:match("^(%d+)$"))
+    if n then return n, nil end                       -- chi co so: tu doan loai
+
+    n = num(text:match("/bundles/(%d+)"))
+    if n then return n, "Bundle" end
+
+    n = num(text:match("/catalog/(%d+)"))
+        or num(text:match("/library/(%d+)"))
+        or num(text:match("/marketplace/asset/(%d+)"))
+        or num(text:match("rbxassetid://(%d+)"))
+        or num(text:match("[?&][Ii][Dd]=(%d+)"))
+    if n then return n, "Asset" end
+    return nil
+end
+
+local function handleSearch(player, text)
+    local id, kind = parseInput(text)
+    if not id or id <= 0 then return false, "invalid" end
+    if not kind then
+        kind = assetTypeId(id) and "Asset" or "Bundle"   -- so tran: uu tien mon le
+    end
+    return handleTry(player, { Id = id, ItemType = kind })
+end
+
+remote.OnServerInvoke = function(player, action, payload)
+    local now = os.clock()
+    if busy[player] or (lastUse[player] and now - lastUse[player] < CONFIG.Cooldown) then
+        return false, "cooldown"
+    end
+    lastUse[player] = now
+    busy[player] = true
+
+    local ok, res, msg = pcall(function()
+        if action == "Try" then
+            return handleTry(player, payload)
+        elseif action == "User" then
+            return handleUser(player, payload)
+        elseif action == "Search" then
+            return handleSearch(player, payload)
+        elseif action == "Reset" then
+            return handleReset(player)
+        end
+        return false, "invalid"
+    end)
+
+    busy[player] = nil
+    lastUse[player] = os.clock()
+    if not ok then
+        warn("[QuyOutfit] loi:", res)
+        return false, "error"
+    end
+    return res, msg
+end
+
+-- ============================================================
+-- NGUOI CHOI VAO / RA / HOI SINH
+-- ============================================================
+local function onAppearance(player)
+    if not original[player] then
+        ensureBase(player)          -- lan dau: luu bo do goc
+    elseif CONFIG.KeepOnRespawn and modified[player] and current[player] then
+        applyDesc(player, current[player])   -- hoi sinh: mac lai do dang thu
+    end
+end
+
+local function onPlayerAdded(player)
+    player.CharacterAppearanceLoaded:Connect(function()
+        onAppearance(player)
+    end)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+for _, p in ipairs(Players:GetPlayers()) do onPlayerAdded(p) end
+
+Players.PlayerRemoving:Connect(function(player)
+    original[player], current[player], modified[player] = nil, nil, nil
+    forced[player] = nil
+    busy[player], lastUse[player] = nil, nil
+end)

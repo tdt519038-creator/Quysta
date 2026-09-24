@@ -1,0 +1,930 @@
+--[[
+================================================================
+  QUY AUTO  (Auto Lock-On + Auto Defense - LocalScript duy nhat)
+----------------------------------------------------------------
+  1) AUTO LOCK: danh thuong / ky nang -> ghim quai gan nhat trong tam,
+     nhan vat + camera quay ve muc tieu, het ky nang camera tra ve.
+  2) AUTO DEFENSE: don danh / ky nang sap cham nguoi choi ->
+       - don DO DUOC  -> tu dong do (giu do), het don thi nha do
+       - don KHONG DO DUOC -> tu dong ne (sidestep)
+       - nhieu don cung luc -> phong thu don co SAT THUONG CAO NHAT
+  3) Nut tron nho: bam de hien / an menu (keo di duoc)
+
+  DAT: StarterPlayer > StarterPlayerScripts (LocalScript)
+
+  DE AUTO DEFENSE HOAT DONG, game cua ban can:
+   - Gan tag "EnemyAttack" (CollectionService) cho hitbox / projectile
+     cua don danh quai. (co the doi ten trong CONFIG.Defense.AttackTag)
+   - Tren hitbox (hoac model quai) dat Attribute:
+       Damage    (number)  sat thuong cua don
+       Blockable (bool)    true = do duoc, false = phai ne
+       Active    (bool)    tuy chon, false = hitbox chua bat
+   - Hanh dong do: RemoteEvent ten "BlockRemote" trong ReplicatedStorage
+     (FireServer(true/false)) hoac dien vao CONFIG.Defense.OnBlock
+   - Hanh dong ne: mac dinh buoc ngang ne (local). Muon dung ky nang ne
+     cua game thi dat OnDodge / DodgeRemoteName va LocalDodge = false
+================================================================
+--]]
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local TweenService      = game:GetService("TweenService")
+local UserInputService  = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- CONFIG
+-- ============================================================
+local CONFIG = {
+    GuiName   = "QuyAutoGui",
+    ToggleKey = Enum.KeyCode.RightShift,   -- an/hien menu (ngoai nut tron)
+
+    -- ---------- AUTO LOCK ----------
+    -- Moi ky nang co the co Range / Duration rieng, de {} = dung mac dinh
+    SkillKeys = {
+        [Enum.KeyCode.Z] = {}, [Enum.KeyCode.X] = {}, [Enum.KeyCode.C] = {},
+        [Enum.KeyCode.V] = {}, [Enum.KeyCode.F] = {}, [Enum.KeyCode.E] = {},
+        [Enum.KeyCode.R] = {}, [Enum.KeyCode.Q] = {},
+    },
+    LockRange     = 40,    -- tam ghim ky nang (studs)
+    SkillDuration = 1.5,   -- giay ghim khi dung ky nang
+    BasicRange    = 25,    -- tam ghim danh thuong
+    BasicDuration = 0.4,   -- giay ghim khi danh thuong
+    LoseRangeMul  = 1.5,   -- muc tieu xa hon Range*1.5 thi mat ghim
+    DashSpeed     = 45,    -- toc do >= nay = dang luot -> giu ghim
+    DashGrace     = 0.25,
+    MaxLockTime   = 3.5,   -- gioi han 1 lan ghim (tranh ket camera)
+    CamBlendIn    = 0.12,
+    CamBlendOut   = 0.25,  -- camera tra ve binh thuong muot
+    TurnCharacter = true,
+
+    EnemyTag            = "FarmableEnemy",
+    FallbackEnemyFolder = "Enemies",
+
+    -- ---------- AUTO DEFENSE ----------
+    Defense = {
+        AttackTag      = "EnemyAttack",
+        ReactTime      = 0.45,  -- chi phan ung neu don SE TRUNG trong <= giay nay (du doan)
+        HitPadding     = 1,     -- du dia them quanh vung sat thuong (studs). 0 = sat nhat
+        PlayerHalfSize = Vector3.new(1.5, 3, 1.5), -- nua kich thuoc hitbox nguoi choi
+        ScanInterval   = 0.02,  -- chu ky quet don (giay)
+        CamSnapIn      = 0.06,  -- camera quay ve phia don trong ~0.06s (chop nhoang)
+        DefaultDamage  = 10,    -- neu hitbox khong co attribute Damage
+        ReleaseDelay   = 0.3,   -- het nguy hiem sau bay nhieu giay thi nha do
+        TurnToBlock    = true,  -- xoay mat ve phia don khi dang do
+
+        BlockRemoteName = "BlockRemote",  -- RemoteEvent trong ReplicatedStorage (hoac nil)
+        DodgeRemoteName = nil,            -- vi du "DodgeRemote"
+        OnBlock = nil,   -- function(on: boolean)  -- dien de goi ky nang do cua game ban
+        OnDodge = nil,   -- function(direction: Vector3)
+
+        LocalDodge    = true,   -- true = buoc ngang ne bang van toc (local)
+        DodgeSpeed    = 70,
+        DodgeTime     = 0.22,
+        DodgeCooldown = 1.2,
+    },
+
+    NotifyDuration = 2,
+}
+
+do
+    local old = PlayerGui:FindFirstChild(CONFIG.GuiName)
+    if old then old:Destroy() end
+end
+
+-- quan ly ket noi de chay lai script khong bi trung
+local conns = {}
+local function track(c) conns[#conns + 1] = c; return c end
+pcall(function() RunService:UnbindFromRenderStep("AutoLockCamera") end)
+
+-- ============================================================
+-- HAM TIEN ICH
+-- ============================================================
+local function getCharacter() return LocalPlayer.Character end
+local function getHumanoid()
+    local c = getCharacter()
+    return c and c:FindFirstChildOfClass("Humanoid") or nil
+end
+local function getHRP()
+    local c = getCharacter()
+    return c and c:FindFirstChild("HumanoidRootPart") or nil
+end
+local function isAlive()
+    local h = getHumanoid()
+    return h ~= nil and h.Health > 0
+end
+
+-- ============================================================
+-- NOTIFY
+-- ============================================================
+local NotifyContainer
+local function notify(text, isError)
+    if not NotifyContainer or not NotifyContainer.Parent then return end
+    local frame = Instance.new("Frame")
+    frame.BackgroundColor3 = isError and Color3.fromRGB(180,60,60) or Color3.fromRGB(40,45,55)
+    frame.BackgroundTransparency = 0.1
+    frame.Size = UDim2.new(0, 200, 0, 26)
+    frame.AutomaticSize = Enum.AutomaticSize.X
+    frame.Position = UDim2.new(0.5, 0, 0, 0)
+    frame.AnchorPoint = Vector2.new(0.5, 0)
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Size = UDim2.new(1,-16,1,0); l.Position = UDim2.new(0,8,0,0)
+    l.Font = Enum.Font.GothamMedium; l.TextSize = 11
+    l.TextColor3 = Color3.new(1,1,1); l.Text = text; l.Parent = frame
+    frame.Parent = NotifyContainer
+    task.spawn(function()
+        task.wait(CONFIG.NotifyDuration)
+        if frame.Parent then
+            TweenService:Create(frame, TweenInfo.new(0.3), {BackgroundTransparency=1}):Play()
+            TweenService:Create(l, TweenInfo.new(0.3), {TextTransparency=1}):Play()
+            task.wait(0.35); frame:Destroy()
+        end
+    end)
+    for _, o in ipairs(NotifyContainer:GetChildren()) do
+        if o:IsA("Frame") and o ~= frame then
+            local y = o.Position.Y.Offset
+            TweenService:Create(o, TweenInfo.new(0.2),
+                {Position = UDim2.new(0.5,0,0,y-32)}):Play()
+        end
+    end
+end
+
+-- ============================================================
+-- TIM QUAI (tag hoac folder)
+-- ============================================================
+local function getEnemyRoot(model)
+    if not model or not model:IsA("Model") then return nil end
+    return model:FindFirstChild("HumanoidRootPart")
+        or model.PrimaryPart
+        or model:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function isValidEnemy(model)
+    if not model or not model.Parent then return false end
+    if not model:IsA("Model") then return false end
+    if model == getCharacter() then return false end
+    if Players:GetPlayerFromCharacter(model) then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    return getEnemyRoot(model) ~= nil
+end
+
+local function collectEnemies()
+    local list, seen = {}, {}
+    local function add(m)
+        if not seen[m] and isValidEnemy(m) then
+            seen[m] = true
+            table.insert(list, m)
+        end
+    end
+    for _, m in ipairs(CollectionService:GetTagged(CONFIG.EnemyTag)) do add(m) end
+    local folder = workspace:FindFirstChild(CONFIG.FallbackEnemyFolder)
+    if folder then
+        for _, m in ipairs(folder:GetChildren()) do add(m) end
+    end
+    return list
+end
+
+local function findNearestEnemy(range)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local best, bestDist = nil, range
+    for _, m in ipairs(collectEnemies()) do
+        local root = getEnemyRoot(m)
+        local d = (root.Position - hrp.Position).Magnitude
+        if d <= bestDist then
+            best, bestDist = m, d
+        end
+    end
+    return best
+end
+
+-- ============================================================
+-- AUTO DEFENSE (khai bao truoc vi AutoLock can biet trang thai do)
+-- ============================================================
+local AutoLock -- khai bao truoc
+local Defense = {
+    enabled = true,
+    reacting = false,
+    threatPart = nil,
+    camAim = nil,
+    camWeight = 0,
+    blocking = false,
+    lastThreat = 0,
+    threatPos = nil,
+    nextDodge = 0,
+    dodgeUntil = 0,
+    dodgeVec = Vector3.zero,
+    status = "",
+}
+local statusLabel, menuFrame -- gan khi tao GUI
+local diagText = ""
+
+local function refreshStatus()
+    if statusLabel then statusLabel.Text = "PT: " .. Defense.status .. diagText end
+end
+local function setStatus(text)
+    if Defense.status ~= text then
+        Defense.status = text
+        refreshStatus()
+    end
+end
+
+local function attrOf(inst, name)
+    local v = inst:GetAttribute(name)
+    if v ~= nil then return v end
+    local m = inst:FindFirstAncestorOfClass("Model")
+    if m then return m:GetAttribute(name) end
+    return nil
+end
+
+local function fireRemote(name, ...)
+    if not name then return end
+    local r = ReplicatedStorage:FindFirstChild(name)
+    if r and r:IsA("RemoteEvent") then r:FireServer(...) end
+end
+
+local blockFx, warnedBlock = nil, false
+local function setBlock(on)
+    if Defense.blocking == on then return end
+    Defense.blocking = on
+    local D = CONFIG.Defense
+    fireRemote(D.BlockRemoteName, on)
+    if D.OnBlock then pcall(D.OnBlock, on) end
+
+    -- hieu ung xanh tren nhan vat = bang chung trang thai DO dang hoat dong
+    if blockFx then blockFx:Destroy(); blockFx = nil end
+    if on then
+        local char = getCharacter()
+        if char then
+            blockFx = Instance.new("Highlight")
+            blockFx.FillColor = Color3.fromRGB(80, 160, 255)
+            blockFx.FillTransparency = 0.6
+            blockFx.OutlineColor = Color3.fromRGB(180, 220, 255)
+            blockFx.Parent = char
+        end
+        local hasRemote = D.BlockRemoteName and ReplicatedStorage:FindFirstChild(D.BlockRemoteName)
+        if not hasRemote and not D.OnBlock and not warnedBlock then
+            warnedBlock = true
+            notify("Chua noi hanh dong DO cua game (BlockRemote/OnBlock): chi co hieu ung xanh", true)
+        end
+    end
+end
+
+local function doDodge(th)
+    local D = CONFIG.Defense
+    local now = os.clock()
+    if now < Defense.nextDodge then return end
+    local hrp = getHRP()
+    if not hrp then return end
+    local hum = getHumanoid()
+    local mv = hum and hum.MoveDirection or Vector3.zero
+
+    local relFlat = Vector3.new(hrp.Position.X - th.pos.X, 0, hrp.Position.Z - th.pos.Z)
+    local travel  = Vector3.new(th.vel.X, 0, th.vel.Z)
+    local vec
+    if travel.Magnitude > 2 then
+        -- don dang bay: ne vuong goc voi duong bay, ra phia nguoi choi dang dung
+        travel = travel.Unit
+        local side = Vector3.new(-travel.Z, 0, travel.X)
+        local s = relFlat:Dot(side)
+        if math.abs(s) < 0.5 then s = mv:Dot(side) end
+        vec = side * (s >= 0 and 1 or -1)
+    else
+        -- vung sat thuong dung yen: chay thang ra xa tam
+        vec = relFlat.Magnitude > 0.05 and relFlat.Unit or -hrp.CFrame.LookVector
+    end
+
+    Defense.nextDodge = now + D.DodgeCooldown
+    Defense.dodgeUntil = now + D.DodgeTime
+    Defense.dodgeVec = vec
+    if D.LocalDodge then
+        local ok = pcall(function()
+            local att = Instance.new("Attachment")
+            att.Parent = hrp
+            local lv = Instance.new("LinearVelocity")
+            lv.Attachment0 = att
+            lv.RelativeTo = Enum.ActuatorRelativeTo.World
+            lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+            lv.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+            lv.MaxAxesForce = Vector3.new(1e6, 0, 1e6)   -- truc Y de trong: van roi tu do
+            lv.VectorVelocity = vec * D.DodgeSpeed
+            lv.Parent = hrp
+            task.delay(D.DodgeTime, function() lv:Destroy(); att:Destroy() end)
+        end)
+        if not ok then
+            hrp.AssemblyLinearVelocity = Vector3.new(vec.X * D.DodgeSpeed,
+                hrp.AssemblyLinearVelocity.Y, vec.Z * D.DodgeSpeed)
+        end
+    end
+    fireRemote(D.DodgeRemoteName, vec)
+    if D.OnDodge then pcall(D.OnDodge, vec) end
+end
+
+-- Van toc hitbox: neu game di chuyen hitbox bang CFrame/Tween (van toc = 0) thi tu uoc luong
+local lastSeen = setmetatable({}, { __mode = "k" })
+local function getPartVelocity(part, now)
+    local vel = part.AssemblyLinearVelocity
+    local pos = part.Position
+    local prev = lastSeen[part]
+    lastSeen[part] = { pos = pos, t = now }
+    if vel.Magnitude < 1 and prev then
+        local dt = now - prev.t
+        if dt >= 0.015 and dt <= 0.3 then
+            local est = (pos - prev.pos) / dt
+            if est.Magnitude < 500 then return est end
+        end
+    end
+    return vel
+end
+
+-- Mo phong duong di cua hitbox va nguoi choi trong ReactTime giay toi.
+-- Tra ve thoi diem cham dau tien, hoac nil neu KHONG TRUNG.
+local function timeToHit(part, vel, hrpPos, hrpVel, D)
+    local cf = part.CFrame
+    local isBall = part:IsA("Part") and part.Shape == Enum.PartType.Ball
+    local pad = Vector3.new(D.HitPadding, D.HitPadding, D.HitPadding)
+    local half = part.Size / 2 + D.PlayerHalfSize + pad
+    local radius = part.Size.X / 2 + math.max(D.PlayerHalfSize.X, D.PlayerHalfSize.Z) + D.HitPadding
+    local minHalf = math.max(0.5, math.min(half.X, half.Y, half.Z))
+    local relSpeed = (vel - hrpVel).Magnitude
+    -- buoc thoi gian nho khi don nhanh de khong "xuyen qua" hitbox
+    local step = math.clamp(minHalf * 0.8 / math.max(relSpeed, 1), 0.005, 0.05)
+
+    local t = 0
+    while t <= D.ReactTime do
+        local rel = (hrpPos + hrpVel * t) - (cf.Position + vel * t)
+        if isBall then
+            if rel.Magnitude <= radius then return t end
+        else
+            local l = cf:VectorToObjectSpace(rel)
+            if math.abs(l.X) <= half.X and math.abs(l.Y) <= half.Y and math.abs(l.Z) <= half.Z then
+                return t
+            end
+        end
+        t += step
+    end
+    return nil
+end
+
+-- Chi tinh cac don SE TRUNG nguoi choi; chon don SAT THUONG CAO NHAT
+local function scanThreats(now)
+    local hrp = getHRP()
+    local char = getCharacter()
+    if not hrp or not char then return nil end
+    local D = CONFIG.Defense
+    local hrpPos, hrpVel = hrp.Position, hrp.AssemblyLinearVelocity
+    local best
+
+    for _, part in ipairs(CollectionService:GetTagged(D.AttackTag)) do
+        if part:IsA("BasePart") and part:IsDescendantOf(workspace)
+            and not part:IsDescendantOf(char) and attrOf(part, "Active") ~= false then
+
+            local vel = getPartVelocity(part, now)
+            local t = timeToHit(part, vel, hrpPos, hrpVel, D)
+            if t then
+                local dmg = tonumber(attrOf(part, "Damage")) or D.DefaultDamage
+                if not best or dmg > best.damage or (dmg == best.damage and t < best.t) then
+                    best = {
+                        part = part,
+                        pos = part.Position,
+                        vel = vel,
+                        t = t,
+                        damage = dmg,
+                        blockable = attrOf(part, "Blockable") ~= false,
+                    }
+                end
+            end
+        end
+    end
+    return best
+end
+
+local scanAcc, diagAcc = 0, 0
+track(RunService.Heartbeat:Connect(function(dt)
+    local D = CONFIG.Defense
+    local now = os.clock()
+    local hrp = getHRP()
+
+    -- chan doan: dem so quai va so hitbox script dang thay (khi menu mo)
+    diagAcc += dt
+    if diagAcc >= 0.5 then
+        diagAcc = 0
+        if menuFrame and menuFrame.Visible then
+            diagText = (" | Quai %d | Don %d"):format(#collectEnemies(),
+                #CollectionService:GetTagged(D.AttackTag))
+            refreshStatus()
+        end
+    end
+
+    if not Defense.enabled or not isAlive() then
+        Defense.reacting = false
+        if Defense.blocking then setBlock(false) end
+        setStatus(Defense.enabled and "Ranh" or "Tat")
+        return
+    end
+
+    scanAcc += dt
+    if scanAcc < D.ScanInterval then return end
+    scanAcc = 0
+
+    local th = scanThreats(now)
+    if th then
+        Defense.lastThreat = now
+        Defense.reacting = true
+        Defense.threatPart = th.part
+        Defense.threatPos = th.pos
+        Defense.camAim = th.pos
+        AutoLock:interrupt()                     -- bo ghim quai NGAY LAP TUC
+        if th.blockable then
+            setBlock(true)                       -- don do duoc -> do
+            setStatus("Do")
+        else
+            if Defense.blocking then setBlock(false) end
+            doDodge(th)                          -- don khong do duoc -> ne
+            setStatus("Ne")
+        end
+    elseif now - Defense.lastThreat >= D.ReleaseDelay then
+        -- khong con don nao se trung -> nha do, tra camera
+        Defense.reacting = false
+        Defense.threatPart = nil
+        if Defense.blocking then setBlock(false) end
+        setStatus("Ranh")
+    end
+end))
+
+-- ============================================================
+-- AUTO LOCK-ON
+-- ============================================================
+AutoLock = {
+    enabled = true,
+    target = nil,
+    expire = 0,
+    weight = 0,
+    lastAimPos = nil,
+    savedAutoRotate = nil,
+    highlight = nil,
+    lockRange = 40,
+    startTime = 0,
+}
+
+local function setHighlight(model)
+    if AutoLock.highlight then
+        AutoLock.highlight:Destroy()
+        AutoLock.highlight = nil
+    end
+    if model then
+        local h = Instance.new("Highlight")
+        h.FillTransparency = 1
+        h.OutlineColor = Color3.fromRGB(255, 60, 60)
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Parent = model
+        AutoLock.highlight = h
+    end
+end
+
+local function restoreAutoRotate()
+    if AutoLock.savedAutoRotate ~= nil then
+        local hum = getHumanoid()
+        if hum then hum.AutoRotate = AutoLock.savedAutoRotate end
+        AutoLock.savedAutoRotate = nil
+    end
+end
+
+local function releaseTarget()
+    AutoLock.target = nil
+    AutoLock.expire = 0
+    setHighlight(nil)
+    restoreAutoRotate()
+end
+
+-- Bi tan cong: bo ghim tuc thi, camera do Defense dieu khien
+function AutoLock:interrupt()
+    if self.target then releaseTarget() end
+    self.weight = 0
+    self.lastAimPos = nil
+end
+
+function AutoLock:trigger(duration, range)
+    if not self.enabled or not isAlive() or Defense.reacting then return end
+    range = range or CONFIG.LockRange
+    local target = findNearestEnemy(range)
+    if not target then return end
+    if target ~= self.target then
+        self.target = target
+        setHighlight(target)
+    end
+    local now = os.clock()
+    self.startTime = now
+    self.expire = now + duration
+    self.lockRange = range
+end
+
+RunService:BindToRenderStep("AutoLockCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
+    local cam = workspace.CurrentCamera
+    local hrp = getHRP()
+    local now = os.clock()
+    local active = false
+
+    local target = AutoLock.target
+    if target then
+        local root = isValidEnemy(target) and getEnemyRoot(target) or nil
+        if root and hrp and isAlive() and now < AutoLock.expire
+            and (root.Position - hrp.Position).Magnitude <= AutoLock.lockRange * CONFIG.LoseRangeMul then
+            active = true
+            AutoLock.lastAimPos = root.Position
+
+            if hrp.AssemblyLinearVelocity.Magnitude >= CONFIG.DashSpeed then
+                local cap = AutoLock.startTime + CONFIG.MaxLockTime
+                AutoLock.expire = math.max(AutoLock.expire, math.min(now + CONFIG.DashGrace, cap))
+            end
+
+            -- dang do thi uu tien quay ve phia don, khong quay ve quai
+            if CONFIG.TurnCharacter and not Defense.blocking then
+                local hum = getHumanoid()
+                if hum then
+                    if AutoLock.savedAutoRotate == nil then
+                        AutoLock.savedAutoRotate = hum.AutoRotate
+                    end
+                    hum.AutoRotate = false
+                end
+                local flat = Vector3.new(root.Position.X, hrp.Position.Y, root.Position.Z)
+                if (flat - hrp.Position).Magnitude > 0.05 then
+                    hrp.CFrame = CFrame.lookAt(hrp.Position, flat)
+                end
+            end
+        else
+            releaseTarget()  -- het ky nang / quai chet / ra khoi tam
+        end
+    end
+
+    if active then
+        AutoLock.weight = math.min(1, AutoLock.weight + dt / CONFIG.CamBlendIn)
+    else
+        AutoLock.weight = math.max(0, AutoLock.weight - dt / CONFIG.CamBlendOut)
+    end
+
+    if AutoLock.weight > 0 and AutoLock.lastAimPos and cam then
+        local cf = cam.CFrame
+        if (AutoLock.lastAimPos - cf.Position).Magnitude > 0.1 then
+            local look = CFrame.lookAt(cf.Position, AutoLock.lastAimPos)
+            cam.CFrame = cf:Lerp(look, AutoLock.weight)
+        end
+    end
+
+    -- ===== AUTO DEFENSE: uu tien cao nhat, de len ghim =====
+    local D = CONFIG.Defense
+    local part = Defense.threatPart
+    if Defense.reacting and part and part.Parent then
+        Defense.camAim = part.Position          -- bam theo don dang bay toi
+    end
+    if Defense.reacting and Defense.camAim then
+        Defense.camWeight = math.min(1, Defense.camWeight + dt / D.CamSnapIn)
+    else
+        Defense.camWeight = math.max(0, Defense.camWeight - dt / CONFIG.CamBlendOut)
+    end
+    if Defense.camWeight > 0 and Defense.camAim and cam then
+        local cf = cam.CFrame
+        if (Defense.camAim - cf.Position).Magnitude > 0.1 then
+            cam.CFrame = cf:Lerp(CFrame.lookAt(cf.Position, Defense.camAim), Defense.camWeight)
+        end
+    end
+
+    -- dang do: nhan vat quay mat ve phia don
+    if Defense.blocking and D.TurnToBlock and Defense.camAim and hrp then
+        local flat = Vector3.new(Defense.camAim.X, hrp.Position.Y, Defense.camAim.Z)
+        if (flat - hrp.Position).Magnitude > 0.05 then
+            hrp.CFrame = CFrame.lookAt(hrp.Position, flat)
+        end
+    end
+end)
+
+-- ---- Nhan biet ky nang (phim) & danh thuong (chuot / Tool) ----
+track(UserInputService.InputBegan:Connect(function(input)
+    if UserInputService:GetFocusedTextBox() then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        local skill = CONFIG.SkillKeys[input.KeyCode]
+        if skill then
+            AutoLock:trigger(skill.Duration or CONFIG.SkillDuration,
+                             skill.Range or CONFIG.LockRange)
+        end
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+        AutoLock:trigger(CONFIG.BasicDuration, CONFIG.BasicRange)
+    end
+end))
+
+local hookedTools = {}
+local function hookTool(tool)
+    if not tool:IsA("Tool") or hookedTools[tool] then return end
+    hookedTools[tool] = true
+    track(tool.Activated:Connect(function()
+        AutoLock:trigger(CONFIG.BasicDuration, CONFIG.BasicRange)
+    end))
+    tool.AncestryChanged:Connect(function()
+        if not tool:IsDescendantOf(game) then hookedTools[tool] = nil end
+    end)
+end
+local function hookContainer(container)
+    if not container then return end
+    for _, t in ipairs(container:GetChildren()) do hookTool(t) end
+    track(container.ChildAdded:Connect(hookTool))
+end
+
+hookContainer(LocalPlayer:WaitForChild("Backpack"))
+if getCharacter() then hookContainer(getCharacter()) end
+track(LocalPlayer.CharacterAdded:Connect(function(char)
+    releaseTarget()
+    AutoLock.weight = 0
+    Defense.blocking = false
+    Defense.reacting = false
+    Defense.camWeight = 0
+    Defense.dodgeUntil = 0
+    hookContainer(char)
+    hookContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
+end))
+track(LocalPlayer.CharacterRemoving:Connect(function()
+    releaseTarget()
+    AutoLock.weight = 0
+    Defense.blocking = false
+end))
+
+-- ============================================================
+-- THU NGHIEM: tao don danh gia de kiem tra Defense co that su phan ung
+-- ============================================================
+local function spawnTestAttack(blockable, missOffset)
+    local hrp = getHRP()
+    if not hrp or not isAlive() then notify("Chua co nhan vat", true) return end
+    local D = CONFIG.Defense
+    local right, look = hrp.CFrame.RightVector, hrp.CFrame.LookVector
+    local startPos = hrp.Position + right * 45
+    local endPos   = hrp.Position - right * 45 + look * (missOffset or 0)
+
+    local part = Instance.new("Part")
+    part.Shape = Enum.PartType.Ball
+    part.Size = Vector3.new(4, 4, 4)
+    part.Material = Enum.Material.Neon
+    part.Color = blockable and Color3.fromRGB(80, 160, 255) or Color3.fromRGB(255, 120, 40)
+    part.Anchored = true
+    part.CanCollide = false; part.CanTouch = false; part.CanQuery = false
+    part.Position = startPos
+    part:SetAttribute("Damage", blockable and 20 or 30)
+    part:SetAttribute("Blockable", blockable)
+    part.Parent = workspace
+    CollectionService:AddTag(part, D.AttackTag)
+
+    local dur, t, conn = 1.6, 0, nil
+    conn = RunService.Heartbeat:Connect(function(dt)
+        t += dt
+        if not part.Parent or t >= dur then
+            conn:Disconnect(); part:Destroy(); return
+        end
+        part.Position = startPos:Lerp(endPos, t / dur)
+    end)
+end
+
+-- ============================================================
+-- GUI: nut tron nho + menu gon
+-- ============================================================
+local BUBBLE = 46
+local MENU_W, MENU_H = 190, 180
+
+local gui = Instance.new("ScreenGui")
+gui.Name = CONFIG.GuiName
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = PlayerGui
+
+NotifyContainer = Instance.new("Frame")
+NotifyContainer.BackgroundTransparency = 1
+NotifyContainer.Size = UDim2.new(1, 0, 0, 150)
+NotifyContainer.Position = UDim2.new(0, 0, 0, 30)
+NotifyContainer.Parent = gui
+
+-- ---- nut tron ----
+local bubble = Instance.new("TextButton")
+bubble.Size = UDim2.fromOffset(BUBBLE, BUBBLE)
+bubble.Position = UDim2.new(0, 14, 0.4, 0)
+bubble.BackgroundColor3 = Color3.fromRGB(28, 31, 38)
+bubble.BackgroundTransparency = 0.05
+bubble.AutoButtonColor = false
+bubble.Text = "🎯"
+bubble.TextSize = 22
+bubble.Font = Enum.Font.GothamBold
+bubble.Parent = gui
+Instance.new("UICorner", bubble).CornerRadius = UDim.new(1, 0)
+local ring = Instance.new("UIStroke", bubble)
+ring.Color = Color3.fromRGB(60, 160, 90); ring.Thickness = 2
+
+-- ---- menu ----
+local menu = Instance.new("Frame")
+menu.Size = UDim2.fromOffset(MENU_W, MENU_H)
+menu.BackgroundColor3 = Color3.fromRGB(28, 31, 38)
+menu.BackgroundTransparency = 0.05
+menu.BorderSizePixel = 0
+menu.Visible = false
+menu.Parent = gui
+menuFrame = menu
+Instance.new("UICorner", menu).CornerRadius = UDim.new(0, 8)
+local pad = Instance.new("UIPadding", menu)
+pad.PaddingTop = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 6)
+pad.PaddingLeft = UDim.new(0, 6); pad.PaddingRight = UDim.new(0, 6)
+local list = Instance.new("UIListLayout", menu)
+list.Padding = UDim.new(0, 4); list.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function updateMenuPos()
+    local ap = bubble.AbsolutePosition
+    local vp = gui.AbsoluteSize
+    local x = math.clamp(ap.X, 4, math.max(4, vp.X - MENU_W - 4))
+    local below = ap.Y + BUBBLE + 6 + MENU_H <= vp.Y
+    local y = below and (ap.Y + BUBBLE + 6) or (ap.Y - MENU_H - 6)
+    menu.Position = UDim2.fromOffset(x, math.max(4, y))
+end
+
+local function toggleMenu()
+    menu.Visible = not menu.Visible
+    if menu.Visible then updateMenuPos() end
+end
+
+-- keo nut tron; bam nhe (khong keo) = mo/dong menu
+do
+    local dragging, moved, dragStart, startPos = false, false, nil, nil
+    bubble.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved = true, false
+            dragStart, startPos = i.Position, bubble.Position
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement
+            or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - dragStart
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                bubble.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                                            startPos.Y.Scale, startPos.Y.Offset + d.Y)
+                if menu.Visible then updateMenuPos() end
+            end
+        end
+    end))
+    track(UserInputService.InputEnded:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if not moved then toggleMenu() end
+        end
+    end))
+end
+
+-- ---- thanh phan menu ----
+local ON_COLOR  = Color3.fromRGB(60, 160, 90)
+local OFF_COLOR = Color3.fromRGB(90, 95, 105)
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.BackgroundTransparency = 1
+titleLbl.Size = UDim2.new(1, 0, 0, 16)
+titleLbl.Font = Enum.Font.GothamBold
+titleLbl.TextSize = 12
+titleLbl.TextColor3 = Color3.new(1, 1, 1)
+titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.Text = "Quý Auto"
+titleLbl.LayoutOrder = 1
+titleLbl.Parent = menu
+
+local toggleRow = Instance.new("Frame")
+toggleRow.BackgroundTransparency = 1
+toggleRow.Size = UDim2.new(1, 0, 0, 26)
+toggleRow.LayoutOrder = 2
+toggleRow.Parent = menu
+
+local function makeToggle(xScale, label, state, onChange)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.5, -2, 1, 0)
+    b.Position = UDim2.new(xScale, xScale == 0 and 0 or 2, 0, 0)
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 11
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Parent = toggleRow
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    local function refresh()
+        b.Text = label .. (state.enabled and ": BAT" or ": TAT")
+        b.BackgroundColor3 = state.enabled and ON_COLOR or OFF_COLOR
+    end
+    refresh()
+    b.MouseButton1Click:Connect(function()
+        state.enabled = not state.enabled
+        refresh()
+        onChange(state.enabled)
+        notify(label .. (state.enabled and " da bat" or " da tat"))
+    end)
+end
+
+makeToggle(0, "Lock", AutoLock, function(on)
+    if not on then releaseTarget() end
+end)
+makeToggle(0.5, "Defense", Defense, function(on)
+    if not on and Defense.blocking then setBlock(false) end
+end)
+
+local order = 3
+local function makeInput(labelText, tbl, key)
+    local row = Instance.new("Frame")
+    row.BackgroundTransparency = 1
+    row.Size = UDim2.new(1, 0, 0, 22)
+    row.LayoutOrder = order; order += 1
+    row.Parent = menu
+
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(0.6, 0, 1, 0)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextColor3 = Color3.fromRGB(210, 214, 222)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = labelText
+    lbl.Parent = row
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0.4, 0, 1, 0)
+    box.Position = UDim2.new(0.6, 0, 0, 0)
+    box.BackgroundColor3 = Color3.fromRGB(45, 49, 58)
+    box.BorderSizePixel = 0
+    box.Font = Enum.Font.GothamMedium
+    box.TextSize = 11
+    box.TextColor3 = Color3.new(1, 1, 1)
+    box.ClearTextOnFocus = false
+    box.Text = tostring(tbl[key])
+    box.Parent = row
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
+
+    box.FocusLost:Connect(function()
+        local n = tonumber(box.Text)
+        if n and n > 0 then
+            tbl[key] = n
+        else
+            notify("Gia tri khong hop le", true)
+        end
+        box.Text = tostring(tbl[key])
+    end)
+end
+
+makeInput("Tam ghim (studs)", CONFIG, "LockRange")
+makeInput("Ky nang (giay)", CONFIG, "SkillDuration")
+makeInput("Du doan (giay)", CONFIG.Defense, "ReactTime")
+
+local testRow = Instance.new("Frame")
+testRow.BackgroundTransparency = 1
+testRow.Size = UDim2.new(1, 0, 0, 24)
+testRow.LayoutOrder = order; order += 1
+testRow.Parent = menu
+local function makeTest(i, text, color, fn)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1/3, -3, 1, 0)
+    b.Position = UDim2.new((i - 1) / 3, (i - 1) * 1.5, 0, 0)
+    b.BackgroundColor3 = color
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 10
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Text = text
+    b.Parent = testRow
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    b.MouseButton1Click:Connect(fn)
+end
+makeTest(1, "Thu DO",   Color3.fromRGB(60, 110, 200), function() spawnTestAttack(true, 0) end)
+makeTest(2, "Thu NE",   Color3.fromRGB(200, 100, 40), function() spawnTestAttack(false, 0) end)
+makeTest(3, "Thu TRUOT", Color3.fromRGB(90, 95, 105), function() spawnTestAttack(true, 14) end)
+
+statusLabel = Instance.new("TextLabel")
+statusLabel.BackgroundTransparency = 1
+statusLabel.Size = UDim2.new(1, 0, 0, 16)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 10
+statusLabel.TextColor3 = Color3.fromRGB(150, 155, 165)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Text = "PT: Ranh"
+statusLabel.LayoutOrder = order
+statusLabel.Parent = menu
+
+track(UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == CONFIG.ToggleKey then toggleMenu() end
+end))
+
+gui.Destroying:Connect(function()
+    for _, c in ipairs(conns) do c:Disconnect() end
+    conns = {}
+    pcall(function() RunService:UnbindFromRenderStep("AutoLockCamera") end)
+    if Defense.blocking then setBlock(false) end
+    releaseTarget()
+end)
+
+notify("Quý Auto san sang - bam nut tron de mo menu")

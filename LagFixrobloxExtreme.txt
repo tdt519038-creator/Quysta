@@ -1,0 +1,231 @@
+--[[
+    LAG FIX EXTREME - Roblox LocalScript
+    ------------------------------------------------
+    Đặt script này vào: StarterPlayer > StarterPlayerScripts
+    (Phải là LocalScript, không phải Script thường)
+
+    CHỨC NĂNG:
+    1) Giảm đồ họa: tắt bóng đổ, hiệu ứng ánh sáng nặng, đơn giản hóa material
+       nhưng vẫn giữ màu sắc gốc để nhìn "sạch" chứ không xấu.
+    2) Xóa hiệu ứng kỹ năng (particle, beam, trail, fire, smoke, explosion...)
+       nhưng KHÔNG đụng vào Animation/Animator/Motor6D -> animation vẫn chạy bình thường.
+    3) Cơ chế "chunk loading" kiểu Minecraft: chỉ hiện những Model trong bán kính
+       quanh nhân vật, ngoài bán kính đó sẽ bị ẩn (transparency + tắt va chạm)
+       để giảm tải render/physics. Bán kính nhỏ hơn Minecraft nhiều vì map Roblox
+       thường nhỏ hơn, nhưng vẫn có tác dụng rõ với map lớn lẫn map nhỏ.
+
+    TÙY CHỈNH: chỉnh các số trong bảng CONFIG bên dưới cho phù hợp với game của bạn.
+--]]
+
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+
+local player = Players.LocalPlayer
+
+--=========================================================
+-- CONFIG - CHỈNH Ở ĐÂY
+--=========================================================
+local CONFIG = {
+    RENDER_RADIUS      = 150,   -- Bán kính (stud) quanh nhân vật để hiện object
+    UNLOAD_MARGIN      = 20,    -- Vùng đệm để tránh vật thể bị bật/tắt liên tục khi đứng ở biên
+    UPDATE_INTERVAL    = 0.25,  -- Giây giữa mỗi lần quét lại khoảng cách (thấp hơn = mượt hơn nhưng tốn CPU hơn)
+    IGNORE_FOLDERS      = {     -- Tên các folder/model KHÔNG bị ẩn dù ở xa (map nền, sky, spawn...)
+        -- ["Baseplate"] = true,
+        -- ["Spawns"] = true,
+    },
+    KEEP_EFFECT_TAGS = { -- Nếu bạn dùng CollectionService tag để đánh dấu hiệu ứng cần giữ, thêm tên tag vào đây
+    },
+}
+
+--=========================================================
+-- 1) GIẢM ĐỒ HỌA / LIGHTING
+--=========================================================
+local function simplifyLighting()
+    Lighting.GlobalShadows = false
+    Lighting.Brightness = math.min(Lighting.Brightness, 2)
+    Lighting.EnvironmentSpecularScale = 0
+    Lighting.EnvironmentDiffuseScale = 0
+
+    -- Tắt các hiệu ứng hậu kỳ nặng (Bloom, SunRays, DepthOfField, Blur, ColorCorrection nặng)
+    for _, fx in ipairs(Lighting:GetChildren()) do
+        if fx:IsA("BloomEffect")
+        or fx:IsA("SunRaysEffect")
+        or fx:IsA("DepthOfFieldEffect")
+        or fx:IsA("BlurEffect") then
+            fx.Enabled = false
+        end
+    end
+
+    -- Nếu game đang dùng Future/ShadowMap thì chuyển về Compatibility cho nhẹ
+    pcall(function()
+        Lighting.Technology = Enum.Technology.Compatibility
+    end)
+end
+
+local function simplifyPart(part)
+    if not part:IsA("BasePart") then return end
+    part.CastShadow = false
+    -- Đơn giản hóa material nhưng giữ màu gốc -> vẫn đẹp, không lem nhem
+    if part.Material ~= Enum.Material.Neon and part.Material ~= Enum.Material.ForceField then
+        part.Material = Enum.Material.SmoothPlastic
+    end
+end
+
+local function simplifyExistingWorld()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        simplifyPart(obj)
+    end
+end
+
+-- Áp dụng luôn cho part mới được tạo ra sau này (skill, projectile, map load thêm...)
+workspace.DescendantAdded:Connect(function(obj)
+    task.defer(simplifyPart, obj)
+end)
+
+--=========================================================
+-- 2) XÓA HIỆU ỨNG KỸ NĂNG, GIỮ ANIMATION
+--=========================================================
+-- Những loại object là "hiệu ứng đồ họa" cần xóa/tắt
+local EFFECT_CLASSES = {
+    ParticleEmitter = true,
+    Trail           = true,
+    Beam            = true,
+    Fire            = true,
+    Smoke           = true,
+    Sparkles        = true,
+    Explosion       = true,
+    Highlight       = true, -- outline glow (nếu muốn giữ để dễ nhìn địch thì comment dòng này)
+}
+
+-- Những loại object KHÔNG BAO GIỜ được đụng vào (liên quan animation)
+local SAFE_CLASSES = {
+    Animation      = true,
+    AnimationTrack = true,
+    Animator       = true,
+    Motor6D        = true,
+    Humanoid       = true,
+    AnimationController = true,
+}
+
+local function isProtected(obj)
+    if SAFE_CLASSES[obj.ClassName] then return true end
+    for _, tag in ipairs(CONFIG.KEEP_EFFECT_TAGS) do
+        if CollectionService:HasTag(obj, tag) then return true end
+    end
+    return false
+end
+
+local function stripEffect(obj)
+    if isProtected(obj) then return end
+    if EFFECT_CLASSES[obj.ClassName] then
+        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
+            obj.Enabled = false
+        else
+            obj:Destroy()
+        end
+    end
+end
+
+local function stripExistingEffects()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        stripEffect(obj)
+    end
+end
+
+-- Xóa hiệu ứng ngay khi nó vừa được tạo ra (skill vừa cast xong là bị dọn liền)
+workspace.DescendantAdded:Connect(function(obj)
+    task.defer(stripEffect, obj)
+end)
+
+--=========================================================
+-- 3) CULLING THEO BÁN KÍNH QUANH NHÂN VẬT (kiểu chunk loading)
+--=========================================================
+-- Lưu trạng thái gốc để khôi phục khi vật thể quay lại trong vùng render
+local originalState = {} -- [BasePart] = {Transparency=, CanCollide=}
+local hiddenModels = {}  -- [Model] = true/false (đang bị ẩn hay không)
+
+local function getModelPivotPosition(model)
+    local ok, cframe = pcall(function() return model:GetPivot() end)
+    if ok then return cframe.Position end
+    if model.PrimaryPart then return model.PrimaryPart.Position end
+    return nil
+end
+
+local function shouldIgnore(model)
+    if model == player.Character then return true end
+    if CONFIG.IGNORE_FOLDERS[model.Name] then return true end
+    -- Bỏ qua các model quá nhỏ (đá, cỏ...) để đỡ tốn CPU quét không cần thiết
+    return false
+end
+
+local function setModelHidden(model, hide)
+    if hiddenModels[model] == hide then return end -- không đổi trạng thái thì thôi
+    hiddenModels[model] = hide
+
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if hide then
+                if not originalState[part] then
+                    originalState[part] = {
+                        Transparency = part.Transparency,
+                        CanCollide   = part.CanCollide,
+                    }
+                end
+                part.Transparency = 1
+                part.CanCollide = false
+            else
+                local state = originalState[part]
+                if state then
+                    part.Transparency = state.Transparency
+                    part.CanCollide   = state.CanCollide
+                end
+            end
+        end
+    end
+end
+
+local function cullLoop()
+    while true do
+        task.wait(CONFIG.UPDATE_INTERVAL)
+
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root then continue end
+
+        local rootPos = root.Position
+
+        for _, model in ipairs(workspace:GetChildren()) do
+            if model:IsA("Model") and not shouldIgnore(model) then
+                local pivot = getModelPivotPosition(model)
+                if pivot then
+                    local dist = (pivot - rootPos).Magnitude
+                    local isHidden = hiddenModels[model]
+
+                    if dist > CONFIG.RENDER_RADIUS + CONFIG.UNLOAD_MARGIN then
+                        if not isHidden then
+                            setModelHidden(model, true)
+                        end
+                    elseif dist < CONFIG.RENDER_RADIUS then
+                        if isHidden then
+                            setModelHidden(model, false)
+                        end
+                    end
+                    -- Vùng giữa RENDER_RADIUS và +MARGIN: giữ nguyên trạng thái hiện tại
+                    -- để tránh nhấp nháy khi đi lại gần biên (hysteresis).
+                end
+            end
+        end
+    end
+end
+
+--=========================================================
+-- KHỞI CHẠY
+--=========================================================
+simplifyLighting()
+simplifyExistingWorld()
+stripExistingEffects()
+task.spawn(cullLoop)
+
+print("[LagFixExtreme] Đã kích hoạt: giảm đồ họa + xóa hiệu ứng + culling bán kính " .. CONFIG.RENDER_RADIUS .. " stud")

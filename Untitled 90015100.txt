@@ -1,0 +1,189 @@
+loadstring([[
+-- Untitled Boxing Game - Adaptive Perfect Dodge
+-- Automatically adjusts timing based on punch speed / style
+-- Mobile + Delta supported
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local PlayerGui = player:WaitForChild("PlayerGui")
+local char = player.Character or player.CharacterAdded:Wait()
+local hum = char:WaitForChild("Humanoid")
+local root = char:WaitForChild("HumanoidRootPart")
+
+local DODGE_DISTANCE = 14
+local BASE_COOLDOWN = 0.28
+local DODGE_POWER = 64
+local ENABLED = true
+
+local lastDodge = 0
+local dodging = false
+local mobileGui
+
+local LEFT_KEYS  = {"left", "l_", "l jab", "l cross", "l hook", "leftjab", "lefthook", "l_upper", "leftpunch"}
+local RIGHT_KEYS = {"right", "r_", "r jab", "r cross", "r hook", "rightjab", "righthook", "r_upper", "rightpunch"}
+local ANY_ATTACK = {"punch", "jab", "cross", "hook", "upper", "attack", "hit", "swing", "strike", "combo"}
+
+local function createMobileGUI()
+	if mobileGui then mobileGui:Destroy() end
+
+	mobileGui = Instance.new("ScreenGui")
+	mobileGui.Name = "AdaptiveDodgeGUI"
+	mobileGui.ResetOnSpawn = false
+	mobileGui.Parent = PlayerGui
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0, 155, 0, 55)
+	btn.Position = UDim2.new(1, -175, 0.28, 0)
+	btn.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
+	btn.BackgroundTransparency = 0.12
+	btn.Text = "ADAPTIVE DODGE: ON"
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.TextScaled = true
+	btn.Font = Enum.Font.GothamBold
+	btn.Parent = mobileGui
+
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 12)
+
+	btn.MouseButton1Click:Connect(function()
+		ENABLED = not ENABLED
+		btn.Text = ENABLED and "ADAPTIVE DODGE: ON" or "ADAPTIVE DODGE: OFF"
+		btn.BackgroundColor3 = ENABLED and Color3.fromRGB(0, 180, 90) or Color3.fromRGB(190, 40, 40)
+	end)
+end
+
+local function getPunchInfo(enemyChar)
+	local enemyHum = enemyChar:FindFirstChildOfClass("Humanoid")
+	if not enemyHum then return nil end
+
+	for _, track in pairs(enemyHum:GetPlayingAnimationTracks()) do
+		local name = string.lower(track.Name)
+		local side = nil
+
+		for _, key in pairs(LEFT_KEYS) do
+			if string.find(name, key) then side = "left" break end
+		end
+		if not side then
+			for _, key in pairs(RIGHT_KEYS) do
+				if string.find(name, key) then side = "right" break end
+			end
+		end
+
+		if side or (function()
+			for _, key in pairs(ANY_ATTACK) do
+				if string.find(name, key) then return true end
+			end
+			return false
+		end)() then
+			local progress = 0
+			if track.Length > 0 then
+				progress = track.TimePosition / track.Length
+			end
+			return side or "unknown", progress, track.Length
+		end
+	end
+
+	-- Arm fallback
+	local leftArm = enemyChar:FindFirstChild("Left Arm") or enemyChar:FindFirstChild("LeftHand") or enemyChar:FindFirstChild("LeftLowerArm")
+	local rightArm = enemyChar:FindFirstChild("Right Arm") or enemyChar:FindFirstChild("RightHand") or enemyChar:FindFirstChild("RightLowerArm")
+	local torso = enemyChar:FindFirstChild("Torso") or enemyChar:FindFirstChild("UpperTorso")
+
+	if leftArm and rightArm and torso then
+		local leftDist = (leftArm.Position - torso.Position).Magnitude
+		local rightDist = (rightArm.Position - torso.Position).Magnitude
+		if leftDist > rightDist + 1.15 then return "left", 0.4, 0.5
+		elseif rightDist > leftDist + 1.15 then return "right", 0.4, 0.5 end
+	end
+
+	return nil
+end
+
+local function getClosestEnemy()
+	local closest, shortest = nil, DODGE_DISTANCE
+	for _, plr in pairs(Players:GetPlayers()) do
+		if plr ~= player and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+			local dist = (plr.Character.HumanoidRootPart.Position - root.Position).Magnitude
+			if dist < shortest then
+				shortest = dist
+				closest = plr.Character
+			end
+		end
+	end
+	return closest
+end
+
+local function adaptiveDodge(side, progress, animLength)
+	if dodging or tick() - lastDodge < BASE_COOLDOWN then return end
+
+	-- Adjust timing based on how far the animation has progressed
+	-- Fast punches = dodge earlier | Slow punches = slightly later
+	local timingMultiplier = 1
+	if progress < 0.25 then
+		timingMultiplier = 0.85   -- very early in animation → dodge sooner
+	elseif progress < 0.45 then
+		timingMultiplier = 1.0
+	else
+		timingMultiplier = 1.15  -- already late → still try
+	end
+
+	dodging = true
+	lastDodge = tick()
+
+	local enemy = getClosestEnemy()
+	if not enemy then return end
+	local enemyRoot = enemy:FindFirstChild("HumanoidRootPart")
+	if not enemyRoot then return end
+
+	local toEnemy = (enemyRoot.Position - root.Position).Unit
+	local rightVec = Vector3.new(-toEnemy.Z, 0, toEnemy.X)
+
+	local direction = side == "left" and -rightVec or side == "right" and rightVec or (math.random() > 0.5 and rightVec or -rightVec)
+
+	local bv = Instance.new("BodyVelocity")
+	bv.MaxForce = Vector3.new(130000, 0, 130000)
+	bv.Velocity = direction * (DODGE_POWER * timingMultiplier)
+	bv.Parent = root
+
+	local duration = 0.13 * timingMultiplier
+	task.delay(duration, function()
+		if bv then bv:Destroy() end
+		dodging = false
+	end)
+end
+
+RunService.Heartbeat:Connect(function()
+	if not ENABLED or not root or not hum or hum.Health <= 0 then return end
+
+	local enemyChar = getClosestEnemy()
+	if not enemyChar then return end
+
+	local side, progress, length = getPunchInfo(enemyChar)
+	if side then
+		adaptiveDodge(side, progress or 0.3, length or 0.5)
+	end
+end)
+
+UIS.InputBegan:Connect(function(input, gp)
+	if not gp and input.KeyCode == Enum.KeyCode.V then
+		ENABLED = not ENABLED
+	end
+end)
+
+player.CharacterAdded:Connect(function(newChar)
+	char = newChar
+	hum = newChar:WaitForChild("Humanoid")
+	root = newChar:WaitForChild("HumanoidRootPart")
+	if UIS.TouchEnabled then
+		task.wait(0.6)
+		createMobileGUI()
+	end
+end)
+
+if UIS.TouchEnabled then
+	createMobileGUI()
+end
+
+print("Adaptive Perfect Dodge loaded | Automatically adjusts to punch speed")
+]])()

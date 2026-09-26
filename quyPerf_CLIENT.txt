@@ -1,0 +1,460 @@
+--[[
+  QUY PERF MENU - CLIENT (LocalScript)
+  DAT: StarterPlayer > StarterPlayerScripts
+
+  Menu noi hinh tron mau tim, keo tha duoc. Cham vao mo bang cai dat
+  hieu nang. Moi tinh nang chi anh huong RENDER PHIA MAY NGUOI DUNG
+  (khong doi du lieu that cua nguoi choi khac, khong anh huong server).
+--]]
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local Lighting    = game:GetService("Lighting")
+local UIS         = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- ============================================================
+-- TRANG THAI CAC TINH NANG
+-- ============================================================
+local state = {
+    mannequin   = false,  -- lot phu kien/toc/quan ao nguoi choi khac
+    vfxStrip    = false,  -- tat particle/trail/beam cua nguoi khac & moi truong
+    flatMat     = false,  -- ep vat lieu ve SmoothPlastic
+    noDecal     = false,  -- xoa texture/decal
+    noShadow    = false,  -- tat do bong + suong mu
+    lowTerrain  = false,  -- tat song nuoc, phan chieu, co 3D
+    renderDist  = 500,    -- ban kinh render (m)
+    cullEnabled = false,  -- bat cat vung ngoai ban kinh
+    afkSaver    = false,  -- giam render khi dung yen lau
+}
+
+local ORIG = {} -- luu gia tri goc de hoan tac (Lighting/Terrain)
+
+-- ============================================================
+-- TIEN ICH
+-- ============================================================
+local function eachCharacter(skipSelf, fn)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if not (skipSelf and p == LocalPlayer) and p.Character then
+            fn(p, p.Character)
+        end
+    end
+end
+
+-- ------------------------------------------------------------
+-- 1) MANNEQUIN MODE: lot do nguoi choi khac (chi minh may minh thay)
+-- ------------------------------------------------------------
+local strippedChars = {} -- [character] = true
+
+local function stripCharacter(character)
+    if character == LocalPlayer.Character then return end
+    for _, d in ipairs(character:GetDescendants()) do
+        if d:IsA("Accessory") then
+            d.Handle.LocalTransparencyModifier = 1
+            for _, p in ipairs(d:GetDescendants()) do
+                if p:IsA("BasePart") then p.LocalTransparencyModifier = 1 end
+            end
+        elseif d:IsA("Shirt") or d:IsA("Pants") or d:IsA("ShirtGraphic") then
+            d:Destroy()   -- an toan xoa hang (mac dinh Roblox), khong phai render-only
+        elseif d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+            d.Color = Color3.fromRGB(150, 150, 150)
+            d.Material = Enum.Material.SmoothPlastic
+        elseif d:IsA("Decal") or d:IsA("SpecialMesh") then
+            d.Transparency = 1
+        end
+    end
+    strippedChars[character] = true
+end
+
+local function restoreCharacter(player)
+    -- cach don gian & chac chan nhat: load lai character tu server (khong xoa nguoi choi)
+    local char = player.Character
+    if char then
+        strippedChars[char] = nil
+    end
+end
+
+local function applyMannequin(on)
+    state.mannequin = on
+    eachCharacter(true, function(p, char)
+        if on then
+            stripCharacter(char)
+        end
+    end)
+    -- Luu y: tat che do nay se KHONG tu dong mac lai quan ao da Destroy;
+    -- can nguoi choi do hoi sinh hoac rejoin de thay lai binh thuong.
+end
+
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function(char)
+        if state.mannequin then task.wait(0.3) stripCharacter(char) end
+    end)
+end)
+
+-- ------------------------------------------------------------
+-- 2) VFX STRIPPER: tat particle/trail/beam cua nguoi khac + moi truong
+-- ------------------------------------------------------------
+local function filterVFX()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Sparkles") then
+            local ownChar = obj:FindFirstAncestorWhichIsA("Model") == LocalPlayer.Character
+            if not ownChar and not obj:GetAttribute("KeepVFX") then
+                obj.Enabled = false
+            end
+        end
+    end
+end
+
+local vfxConn
+local function applyVFXStrip(on)
+    state.vfxStrip = on
+    if on then
+        filterVFX()
+        vfxConn = workspace.DescendantAdded:Connect(function(obj)
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Sparkles") then
+                task.wait(0.05)
+                local ownChar = obj:FindFirstAncestorWhichIsA("Model") == LocalPlayer.Character
+                if not ownChar and not obj:GetAttribute("KeepVFX") then
+                    obj.Enabled = false
+                end
+            end
+        end)
+    elseif vfxConn then
+        vfxConn:Disconnect()
+        vfxConn = nil
+    end
+end
+
+-- ------------------------------------------------------------
+-- 3) DON GIAN VAT LIEU (SmoothPlastic toan map)
+-- ------------------------------------------------------------
+local flatBackup = {}
+local function applyFlatMaterial(on)
+    state.flatMat = on
+    if on then
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("BasePart") and d.Material ~= Enum.Material.SmoothPlastic then
+                flatBackup[d] = d.Material
+                d.Material = Enum.Material.SmoothPlastic
+            end
+        end
+    else
+        for part, mat in pairs(flatBackup) do
+            if part.Parent then part.Material = mat end
+        end
+        flatBackup = {}
+    end
+end
+
+-- ------------------------------------------------------------
+-- 4) XOA DECAL/TEXTURE
+-- ------------------------------------------------------------
+local decalBackup = {}
+local function applyNoDecal(on)
+    state.noDecal = on
+    if on then
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if (d:IsA("Decal") or d:IsA("Texture")) and d.Transparency < 1 then
+                decalBackup[d] = d.Transparency
+                d.Transparency = 1
+            end
+        end
+    else
+        for d, t in pairs(decalBackup) do
+            if d.Parent then d.Transparency = t end
+        end
+        decalBackup = {}
+    end
+end
+
+-- ------------------------------------------------------------
+-- 5) TAT BONG DO + SUONG MU
+-- ------------------------------------------------------------
+local function applyNoShadow(on)
+    state.noShadow = on
+    if on then
+        ORIG.GlobalShadows = Lighting.GlobalShadows
+        ORIG.FogEnd = Lighting.FogEnd
+        ORIG.FogStart = Lighting.FogStart
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 100000
+        for _, e in ipairs(Lighting:GetChildren()) do
+            if e:IsA("PostEffect") then e.Enabled = false end
+        end
+    else
+        if ORIG.GlobalShadows ~= nil then Lighting.GlobalShadows = ORIG.GlobalShadows end
+        if ORIG.FogEnd then Lighting.FogEnd = ORIG.FogEnd end
+        if ORIG.FogStart then Lighting.FogStart = ORIG.FogStart end
+    end
+end
+
+-- ------------------------------------------------------------
+-- 6) TOI UU TERRAIN
+-- ------------------------------------------------------------
+local function applyLowTerrain(on)
+    state.lowTerrain = on
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return end
+    if on then
+        ORIG.WaterWaveSize = terrain.WaterWaveSize
+        ORIG.WaterReflect  = terrain.WaterReflectance
+        ORIG.Decoration    = terrain.Decoration
+        terrain.WaterWaveSize = 0
+        terrain.WaterReflectance = 0
+        terrain.Decoration = false
+    else
+        if ORIG.WaterWaveSize then terrain.WaterWaveSize = ORIG.WaterWaveSize end
+        if ORIG.WaterReflect then terrain.WaterReflectance = ORIG.WaterReflect end
+        if ORIG.Decoration ~= nil then terrain.Decoration = ORIG.Decoration end
+    end
+end
+
+-- ------------------------------------------------------------
+-- 7) BAN KINH RENDER / CHUNK CULLING
+-- ------------------------------------------------------------
+local culled = {}
+local function updateCulling()
+    if not state.cullEnabled then return end
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local pos = root.Position
+    for _, m in ipairs(workspace:GetChildren()) do
+        if m:IsA("Model") and m ~= LocalPlayer.Character and not Players:GetPlayerFromCharacter(m) then
+            local ok, cf = pcall(function() return m:GetPivot() end)
+            if ok then
+                local dist = (cf.Position - pos).Magnitude
+                local shouldShow = dist <= state.renderDist
+                if culled[m] == nil or culled[m] ~= (not shouldShow) then
+                    for _, part in ipairs(m:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.LocalTransparencyModifier = shouldShow and 0 or 1
+                            part.CanQuery = shouldShow
+                        end
+                    end
+                    culled[m] = not shouldShow
+                end
+            end
+        end
+    end
+end
+
+-- ------------------------------------------------------------
+-- 8) AFK SAVER: giam chat luong khi dung yen lau
+-- ------------------------------------------------------------
+local lastMoveTime = os.clock()
+local afkApplied = false
+local afkOrigQuality = nil
+
+local function onCharMoved()
+    lastMoveTime = os.clock()
+    if afkApplied then
+        afkApplied = false
+        pcall(function()
+            settings().Rendering.QualityLevel = afkOrigQuality or Enum.QualityLevel.Automatic
+        end)
+    end
+end
+
+-- ------------------------------------------------------------
+-- 9) DON RAC BO NHO
+-- ------------------------------------------------------------
+local function gcNow()
+    collectgarbage("collect")
+end
+
+task.spawn(function()
+    while true do
+        task.wait(60)
+        gcNow()
+    end
+end)
+
+-- ============================================================
+-- VONG LAP CAP NHAT (culling + afk) - throttle 0.5s
+-- ============================================================
+local acc = 0
+RunService.Heartbeat:Connect(function(dt)
+    acc += dt
+    if acc < 0.5 then return end
+    acc = 0
+    if state.cullEnabled then updateCulling() end
+    if state.afkSaver and not afkApplied and (os.clock() - lastMoveTime) > 20 then
+        afkApplied = true
+        pcall(function()
+            afkOrigQuality = settings().Rendering.QualityLevel
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        end)
+    end
+end)
+
+UIS.InputChanged:Connect(onCharMoved)
+UIS.InputBegan:Connect(onCharMoved)
+
+-- ============================================================
+-- GIAO DIEN: NUT TIM NOI + BANG CAI DAT
+-- ============================================================
+local function make(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    o.Parent = parent
+    return o
+end
+
+local gui = make("ScreenGui", {
+    Name = "QuyPerfMenu", ResetOnSpawn = false, DisplayOrder = 60,
+}, LocalPlayer:WaitForChild("PlayerGui"))
+
+local ball = make("TextButton", {
+    Size = UDim2.fromOffset(56, 56), Position = UDim2.new(0, 12, 0.5, -28),
+    BackgroundColor3 = Color3.fromRGB(120, 40, 200), Text = "⚡",
+    TextSize = 26, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+    ZIndex = 10,
+}, gui)
+make("UICorner", { CornerRadius = UDim.new(1, 0) }, ball)
+
+local panel = make("Frame", {
+    Size = UDim2.fromOffset(280, 420), Position = UDim2.new(0, 76, 0.5, -210),
+    BackgroundColor3 = Color3.fromRGB(28, 24, 36), Visible = false, ZIndex = 10,
+}, gui)
+make("UICorner", { CornerRadius = UDim.new(0, 14) }, panel)
+make("UIStroke", { Color = Color3.fromRGB(150, 90, 230), Thickness = 1.5 }, panel)
+
+local scroller = make("ScrollingFrame", {
+    Size = UDim2.new(1, -16, 1, -16), Position = UDim2.fromOffset(8, 8),
+    BackgroundTransparency = 1, ScrollBarThickness = 4,
+    CanvasSize = UDim2.fromOffset(0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ZIndex = 10,
+}, panel)
+make("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, scroller)
+
+local title = make("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Text = "⚡ Tối ưu hiệu năng",
+    TextColor3 = Color3.fromRGB(200, 160, 255), TextSize = 18, Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0, ZIndex = 10,
+}, scroller)
+
+local order = 1
+local function addToggle(labelText, key, onToggle)
+    order += 1
+    local row = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = Color3.fromRGB(42, 36, 54),
+        LayoutOrder = order, ZIndex = 10,
+    }, scroller)
+    make("UICorner", { CornerRadius = UDim.new(0, 8) }, row)
+    make("TextLabel", {
+        Size = UDim2.new(1, -60, 1, 0), Position = UDim2.fromOffset(10, 0),
+        BackgroundTransparency = 1, Text = labelText, TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 13, Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 10,
+    }, row)
+    local sw = make("TextButton", {
+        Size = UDim2.fromOffset(46, 24), Position = UDim2.new(1, -54, 0.5, -12),
+        BackgroundColor3 = Color3.fromRGB(80, 70, 95), Text = "TẮT",
+        TextColor3 = Color3.new(1, 1, 1), TextSize = 11, Font = Enum.Font.GothamBold, ZIndex = 10,
+    }, row)
+    make("UICorner", { CornerRadius = UDim.new(1, 0) }, sw)
+    sw.MouseButton1Click:Connect(function()
+        local newState = not state[key]
+        onToggle(newState)
+        sw.Text = newState and "BẬT" or "TẮT"
+        sw.BackgroundColor3 = newState and Color3.fromRGB(140, 70, 220) or Color3.fromRGB(80, 70, 95)
+    end)
+    return sw
+end
+
+addToggle("Ma-nơ-canh người chơi khác", "mannequin", applyMannequin)
+addToggle("Xoá hiệu ứng kỹ năng người khác", "vfxStrip", applyVFXStrip)
+addToggle("Đồ hoạ phẳng (SmoothPlastic)", "flatMat", applyFlatMaterial)
+addToggle("Xoá ảnh dán / texture", "noDecal", applyNoDecal)
+addToggle("Tắt đổ bóng & sương mù", "noShadow", applyNoShadow)
+addToggle("Tối ưu mặt nước / cỏ", "lowTerrain", applyLowTerrain)
+addToggle("Giới hạn bán kính hiển thị", "cullEnabled", function(v) state.cullEnabled = v end)
+addToggle("Tiết kiệm pin khi đứng yên", "afkSaver", function(v) state.afkSaver = v end)
+
+order += 1
+local sliderLabel = make("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+    Text = "Bán kính hiển thị: 500m", TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 12, Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = order, ZIndex = 10,
+}, scroller)
+
+order += 1
+local sliderBar = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 20), BackgroundColor3 = Color3.fromRGB(60, 52, 74),
+    LayoutOrder = order, ZIndex = 10,
+}, scroller)
+make("UICorner", { CornerRadius = UDim.new(1, 0) }, sliderBar)
+local sliderFill = make("Frame", {
+    Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.fromRGB(150, 90, 230), ZIndex = 10,
+}, sliderBar)
+make("UICorner", { CornerRadius = UDim.new(1, 0) }, sliderFill)
+
+local draggingSlider = false
+local function setSliderFromX(x)
+    local rel = math.clamp((x - sliderBar.AbsolutePosition.X) / sliderBar.AbsoluteSize.X, 0, 1)
+    sliderFill.Size = UDim2.new(rel, 0, 1, 0)
+    state.renderDist = math.floor(30 + rel * (500 - 30))
+    sliderLabel.Text = ("Bán kính hiển thị: %dm"):format(state.renderDist)
+end
+sliderBar.InputBegan:Connect(function(io)
+    if io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch then
+        draggingSlider = true
+        setSliderFromX(io.Position.X)
+    end
+end)
+UIS.InputChanged:Connect(function(io)
+    if draggingSlider and (io.UserInputType == Enum.UserInputType.MouseMovement or io.UserInputType == Enum.UserInputType.Touch) then
+        setSliderFromX(io.Position.X)
+    end
+end)
+UIS.InputEnded:Connect(function(io)
+    if io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch then
+        draggingSlider = false
+    end
+end)
+
+order += 1
+local gcBtn = make("TextButton", {
+    Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = Color3.fromRGB(90, 60, 150),
+    Text = "🧹 Dọn bộ nhớ ngay", TextColor3 = Color3.new(1, 1, 1), TextSize = 13,
+    Font = Enum.Font.GothamBold, LayoutOrder = order, ZIndex = 10,
+}, scroller)
+make("UICorner", { CornerRadius = UDim.new(0, 8) }, gcBtn)
+gcBtn.MouseButton1Click:Connect(gcNow)
+
+-- ------------------------------------------------------------
+-- Nut tim: cham mo/dong menu, keo tha tu do
+-- ------------------------------------------------------------
+local dragging, dragStart, startPos = false, nil, nil
+ball.InputBegan:Connect(function(io)
+    if io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = io.Position
+        startPos = ball.Position
+    end
+end)
+UIS.InputChanged:Connect(function(io)
+    if dragging and (io.UserInputType == Enum.UserInputType.MouseMovement or io.UserInputType == Enum.UserInputType.Touch) then
+        local delta = io.Position - dragStart
+        ball.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                   startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        panel.Position = UDim2.new(0, ball.Position.X.Offset + 64, 0, ball.Position.Y.Offset - 190)
+    end
+end)
+local moved = false
+ball.InputChanged:Connect(function(io)
+    if io.UserInputType == Enum.UserInputType.MouseMovement or io.UserInputType == Enum.UserInputType.Touch then
+        moved = true
+    end
+end)
+UIS.InputEnded:Connect(function(io)
+    if io.UserInputType == Enum.UserInputType.MouseButton1 or io.UserInputType == Enum.UserInputType.Touch then
+        if dragging and not moved then
+            panel.Visible = not panel.Visible
+        end
+        dragging = false
+        moved = false
+    end
+end)

@@ -1,0 +1,89 @@
+warn("--- Untitled Boxing Game: Auto Dodge Started ---")
+
+local Enabled = true -- Đổi thành false nếu muốn tắt hack tạm thời
+local Dodge_Chance = 100 -- Tỷ lệ né thành công (từ 1 đến 100%). Để 100 là né tuyệt đối.
+
+-- Hệ thống giả lập phím bảo mật nâng cao
+local set_thread_identity = setthreadcontext or set_thread_identity or function() end
+local Client = game.Players.LocalPlayer
+local States = workspace:WaitForChild("States")
+local VIM = game:GetService("VirtualInputManager")
+
+-- Hàm nhấn giữ phím an toàn
+local function hold(keyCode, time)
+    set_thread_identity(7)
+    VIM:SendKeyEvent(true, keyCode, false, game) 
+    task.wait(time) 
+    VIM:SendKeyEvent(false, keyCode, false, game) 
+    set_thread_identity(2)
+end
+
+-- Lấy trạng thái nhân vật
+function get(n, s)
+    pcall(function()
+        return States[n.Name]:FindFirstChild(s, true).Value
+    end)
+    return nil
+end
+
+-- Hàm thực hiện né đòn (Mặc định trong game là phím Space hoặc phím di chuyển + Space)
+function dash()
+    if not Enabled then return end
+    -- Tạo tỷ lệ ngẫu nhiên nếu bạn không muốn né quá lộ liễu (tránh bị report)
+    if math.random(1, 100) <= Dodge_Chance then
+        -- Untitled Boxing Game thường né bằng Space (Mã: 32 hoặc Enum.KeyCode.Space)
+        hold(Enum.KeyCode.Space, 0.08) 
+    end
+end
+
+-- KHỞI TẠO HOOK SỰ KIỆN TỪ SIMPLESPY:
+-- Bắt các hiệu ứng đấm/vung tay của đối thủ thông qua EffectHelper
+shared.BaseEffectFunction = shared.BaseEffectFunction or {}
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local EffectModule = require(ReplicatedStorage.Modules.EffectHelper)
+
+-- Sao lưu hàm gốc của game để không làm lỗi hiển thị
+local oldEffectFunc = EffectModule.CreateEffect or EffectModule.PlayEffect 
+
+if EffectModule then
+    -- Tiến hành Hook đè lên hàm tạo hiệu ứng của game
+    local targetKey = EffectModule.CreateEffect and "CreateEffect" or "PlayEffect"
+    
+    EffectModule[targetKey] = function(...)
+        local args = {...}
+        
+        -- Phân tích dữ liệu từ SimpleSpy truyền vào hàm hiệu ứng
+        -- Nếu hiệu ứng đó không phải do bản thân bạn tạo ra -> Đó là đòn đánh của đối thủ
+        if args[1] and tostring(args[1]) ~= Client.Name then
+            local effectName = tostring(args[2])
+            
+            -- Lọc các hiệu ứng vung nắm đấm (Punch, Jab, Hook, Uppercut, M1, M2...)
+            if effectName:find("Punch") or effectName:find("Swing") or effectName:find("Attack") or effectName:find("Light") or effectName:find("Heavy") then
+                
+                -- Kiểm tra xem trạng thái của mình có đang bị choáng hay không, nếu ổn thì né
+                local isStunned = get(Client, "Stunned") or get(Client, "Ragdoll")
+                if not isStunned then
+                    -- Chạy luồng né độc lập để không làm chậm game
+                    task.spawn(function()
+                        -- Chờ một khoảng cực ngắn (tùy ping) để né chuẩn khung hình hoàn hảo (Perfect Dodge)
+                        task.wait(0.02) 
+                        dash()
+                    end)
+                end
+            end
+        end
+        
+        -- Trả về hàm gốc để game hoạt động bình thường
+        return oldEffectFunc(...)
+    end
+    
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Auto Dodge",
+        Text = "Đã kích hoạt tự động né đòn thành công!",
+        Duration = 5
+    })
+else
+    warn("Không tìm thấy Modules.EffectHelper! Hãy kiểm tra lại cấu trúc game.")
+end
+

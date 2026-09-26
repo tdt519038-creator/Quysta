@@ -1,0 +1,122 @@
+-- SCRIPT REMOTE SPY CHỈ BẮT SỰ KIỆN CỦA CHÍNH BẠN - TỐI ƯU ARCEUS X NEO
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local MyUserId = LocalPlayer.UserId
+local MyName = LocalPlayer.Name
+
+local ScreenGui = Instance.new("ScreenGui")
+local MainFrame = Instance.new("Frame")
+local ScrollingFrame = Instance.new("ScrollingFrame")
+local UIListLayout = Instance.new("UIListLayout")
+local ClearBtn = Instance.new("TextButton")
+
+ScreenGui.Parent = game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
+ScreenGui.ResetOnSpawn = false
+
+MainFrame.Name = "OnlyMeSpyFrame"
+MainFrame.Size = UDim2.new(0.85, 0, 0.35, 0)
+MainFrame.Position = UDim2.new(0.075, 0, 0.15, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+MainFrame.BorderSizePixel = 2
+MainFrame.BorderColor3 = Color3.fromRGB(0, 200, 255)
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+ClearBtn.Size = UDim2.new(1, 0, 0.18, 0)
+ClearBtn.BackgroundColor3 = Color3.fromRGB(120, 30, 30)
+ClearBtn.Text = "XÓA LỊCH SỬ LOG"
+ClearBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ClearBtn.Font = Enum.Font.SourceSansBold
+ClearBtn.TextSize = 14
+ClearBtn.Parent = MainFrame
+ClearBtn.MouseButton1Click:Connect(function()
+    for _, child in pairs(ScrollingFrame:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+end)
+
+ScrollingFrame.Size = UDim2.new(1, 0, 0.82, 0)
+ScrollingFrame.Position = UDim2.new(0, 0, 0.18, 0)
+ScrollingFrame.BackgroundTransparency = 1
+ScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollingFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollingFrame.Parent = MainFrame
+
+UIListLayout.Parent = ScrollingFrame
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Hàm kiểm tra xem gói tin có phải do BẠN tạo ra hay không
+local function isFromMe(args)
+    local character = LocalPlayer.Character
+    for _, arg in pairs(args) do
+        -- Kiểm tra nếu tham số chứa Tên, ID của bạn hoặc Object nhân vật của bạn
+        if arg == MyUserId or arg == MyName or arg == LocalPlayer or (character and (arg == character or arg:IsDescendantOf(character))) then
+            return true
+        end
+    end
+    return false
+end
+
+local function formatArgs(args)
+    local result = ""
+    for i, v in ipairs(args) do
+        if type(v) == "string" then result = result .. '"' .. tostring(v) .. '"'
+        elseif type(v) == "userdata" then result = result .. v:GetFullName()
+        else result = result .. tostring(v) end
+        if i < #args then result = result .. ", " end
+    end
+    return result
+end
+
+local currentLogs = 0
+local function logRemote(remote, method, args)
+    if currentLogs >= 12 then
+        local first = ScrollingFrame:FindFirstChildOfClass("TextButton")
+        if first then first:Destroy() currentLogs = currentLogs - 1 end
+    end
+
+    local remoteName = remote.Name
+    local path = remote:GetFullName()
+    local argString = formatArgs(args)
+    local scriptToCopy = string.format("game.%s:%s(%s)", path, method, argString)
+    
+    local LogBtn = Instance.new("TextButton")
+    LogBtn.Size = UDim2.new(1, -10, 0, 35)
+    LogBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    LogBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    LogBtn.Text = " [" .. remoteName .. "] -> CHẠM ĐỂ COPY"
+    LogBtn.Font = Enum.Font.SourceSans
+    LogBtn.TextSize = 13
+    LogBtn.TextXAlignment = Enum.TextXAlignment.Left
+    LogBtn.Parent = ScrollingFrame
+    currentLogs = currentLogs + 1
+    
+    LogBtn.MouseButton1Click:Connect(function()
+        if setclipboard then
+            setclipboard(scriptToCopy)
+            LogBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 200)
+            LogBtn.Text = " ĐÃ SAO CHÉP CODE!"
+            task.delay(0.6, function()
+                LogBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+                LogBtn.Text = " [" .. remoteName .. "] -> CHẠM ĐỂ COPY"
+            end)
+        end
+    end)
+end
+
+-- Lắng nghe và lọc dữ liệu đầu ra từ máy của bạn
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if (method == "FireServer" and self:IsA("RemoteEvent")) or (method == "InvokeServer" and self:IsA("RemoteFunction")) then
+        -- Chỉ ghi nhận nếu gói tin trùng với định danh cá nhân của bạn
+        if isFromMe(args) then
+            logRemote(self, method, args)
+        end
+    end
+    
+    return oldNamecall(self, ...)
+end)

@@ -1,0 +1,126 @@
+-- REMOTE SPY KÍCH HOẠT THỦ CÔNG QUA NÚT BẤM (CHỐNG SPAM TRẠNG THÁI UBG)
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+local ScreenGui = Instance.new("ScreenGui")
+local MainFrame = Instance.new("Frame")
+local ScrollingFrame = Instance.new("ScrollingFrame")
+local UIListLayout = Instance.new("UIListLayout")
+local ClearBtn = Instance.new("TextButton")
+
+ScreenGui.Parent = game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
+ScreenGui.ResetOnSpawn = false
+
+MainFrame.Name = "ManualClickSpyFrame"
+MainFrame.Size = UDim2.new(0.85, 0, 0.35, 0)
+MainFrame.Position = UDim2.new(0.075, 0, 0.15, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+MainFrame.BorderSizePixel = 2
+MainFrame.BorderColor3 = Color3.fromRGB(255, 0, 100)
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+ClearBtn.Size = UDim2.new(1, 0, 0.18, 0)
+ClearBtn.BackgroundColor3 = Color3.fromRGB(130, 30, 30)
+ClearBtn.Text = "XÓA LỊCH SỬ LOG"
+ClearBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ClearBtn.Font = Enum.Font.SourceSansBold
+ClearBtn.TextSize = 14
+ClearBtn.Parent = MainFrame
+ClearBtn.MouseButton1Click:Connect(function()
+    for _, child in pairs(ScrollingFrame:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+end)
+
+ScrollingFrame.Size = UDim2.new(1, 0, 0.82, 0)
+ScrollingFrame.Position = UDim2.new(0, 0, 0.18, 0)
+ScrollingFrame.BackgroundTransparency = 1
+ScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollingFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollingFrame.Parent = MainFrame
+
+UIListLayout.Parent = ScrollingFrame
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Trạng thái cổng mở/đóng để bắt gói tin
+local isListening = false
+
+-- Khi ngón tay bạn CHẠM vào màn hình điện thoại (bấm nút đấm, né...)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        isListening = true
+        -- Chỉ mở cổng bắt gói tin trong đúng 0.1 giây rồi khóa lại để chặn đứng spam
+        task.delay(0.1, function()
+            isListening = false
+        end)
+    end
+end)
+
+local function formatArgs(args)
+    local result = ""
+    for i, v in ipairs(args) do
+        if type(v) == "string" then result = result .. '"' .. tostring(v) .. '"'
+        elseif type(v) == "userdata" then result = result .. v:GetFullName()
+        else result = result .. tostring(v) end
+        if i < #args then result = result .. ", " end
+    end
+    return result
+end
+
+local function logRemote(remote, method, args)
+    local remoteName = remote.Name
+    local path = remote:GetFullName()
+    local argString = formatArgs(args)
+    local scriptToCopy = string.format("game.%s:%s(%s)", path, method, argString)
+    
+    local LogBtn = Instance.new("TextButton")
+    LogBtn.Size = UDim2.new(1, -10, 0, 35)
+    LogBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    LogBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    LogBtn.Text = " [" .. remoteName .. "] -> Chạm để COPY"
+    LogBtn.Font = Enum.Font.SourceSans
+    LogBtn.TextSize = 13
+    LogBtn.TextXAlignment = Enum.TextXAlignment.Left
+    LogBtn.Parent = ScrollingFrame
+    
+    LogBtn.MouseButton1Click:Connect(function()
+        if setclipboard then
+            setclipboard(scriptToCopy)
+            LogBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 80)
+            LogBtn.Text = " ĐÃ SAO CHÉP CODE!"
+            task.delay(0.6, function()
+                LogBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+                LogBtn.Text = " [" .. remoteName .. "] -> Chạm để COPY"
+            end)
+        end
+    end)
+end
+
+-- Chặn các từ khóa ping/di chuyển cơ bản để tăng độ chính xác
+local Blocklist = {"ping", "heartbeat", "walk", "movement"}
+
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    
+    if (method == "FireServer" and self:IsA("RemoteEvent")) or (method == "InvokeServer" and self:IsA("RemoteFunction")) then
+        -- CHỈ GHI LOG KHI CỔNG ĐANG MỞ (Tức là bạn vừa bấm tay vào màn hình)
+        if isListening then
+            local isSpam = false
+            for _, word in ipairs(Blocklist) do
+                if string.find(string.lower(self.Name), word) then isSpam = true break end
+            end
+            
+            if not isSpam then
+                logRemote(self, method, {...})
+            end
+        end
+    end
+    
+    return oldNamecall(self, ...)
+end)
+
+print("[Spy Thủ Công] Sẵn sàng. Menu sẽ không tự nhảy chữ cho đến khi bạn tự tay bấm nút trên màn hình.")

@@ -1,0 +1,96 @@
+local CoreGui = game:GetService("CoreGui")
+if CoreGui:FindFirstChild("MiniSpy") then 
+    CoreGui.MiniSpy:Destroy() 
+end
+
+local sg = Instance.new("ScreenGui", CoreGui)
+sg.Name = "MiniSpy"
+
+local fr = Instance.new("Frame", sg)
+fr.Size = UDim2.new(0, 400, 0, 300)
+fr.Position = UDim2.new(0.7, 0, 0.5, 0)
+fr.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+fr.Active = true
+fr.Draggable = true
+
+local toggleBtn = Instance.new("TextButton", fr)
+toggleBtn.Size = UDim2.new(0, 120, 0, 30)
+toggleBtn.Position = UDim2.new(0, 5, 0, 5)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.Text = "RECORDING: OFF"
+toggleBtn.Font = Enum.Font.Code
+toggleBtn.TextSize = 13
+
+local clearBtn = Instance.new("TextButton", fr)
+clearBtn.Size = UDim2.new(0, 80, 0, 30)
+clearBtn.Position = UDim2.new(0, 130, 0, 5)
+clearBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 200)
+clearBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+clearBtn.Text = "CLEAR"
+clearBtn.Font = Enum.Font.Code
+clearBtn.TextSize = 13
+
+local sf = Instance.new("ScrollingFrame", fr)
+sf.Size = UDim2.new(1, -10, 1, -45)
+sf.Position = UDim2.new(0, 5, 0, 40)
+sf.BackgroundTransparency = 1
+sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+sf.CanvasSize = UDim2.new(0, 0, 0, 0)
+sf.ScrollBarThickness = 4
+
+local ll = Instance.new("UIListLayout", sf)
+ll.Padding = UDim.new(0, 5)
+
+local isRecording = false
+
+toggleBtn.MouseButton1Click:Connect(function()
+    isRecording = not isRecording
+    if isRecording then
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+        toggleBtn.Text = "RECORDING: ON"
+    else
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        toggleBtn.Text = "RECORDING: OFF"
+    end
+end)
+
+clearBtn.MouseButton1Click:Connect(function()
+    for _, v in pairs(sf:GetChildren()) do
+        if v:IsA("TextLabel") then v:Destroy() end
+    end
+end)
+
+local function logRemote(name, args)
+    local txt = Instance.new("TextLabel", sf)
+    txt.Size = UDim2.new(1, 0, 0, 25)
+    txt.BackgroundTransparency = 1
+    txt.TextColor3 = Color3.fromRGB(0, 255, 150)
+    txt.TextXAlignment = Enum.TextXAlignment.Left
+    txt.TextSize = 13
+    txt.Font = Enum.Font.Code
+    txt.TextWrapped = true
+    
+    local str = "[" .. tostring(name) .. "] "
+    for i, v in ipairs(args) do 
+        str = str .. tostring(v) .. " | " 
+    end
+    txt.Text = str
+end
+
+local mt = getrawmetatable(game)
+local old = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() and isRecording and (method == "FireServer" or method == "InvokeServer") then
+        local name = self.Name
+        local args = {...}
+        task.spawn(function() logRemote(name, args) end)
+    end
+    return old(self, ...)
+end)
+
+setreadonly(mt, true)
+

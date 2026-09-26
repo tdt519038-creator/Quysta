@@ -1,0 +1,110 @@
+-- Script Remote Spy tối ưu riêng cho Arceus X Neo
+local ScreenGui = Instance.new("ScreenGui")
+local MainFrame = Instance.new("Frame")
+local ScrollingFrame = Instance.new("ScrollingFrame")
+local UIListLayout = Instance.new("UIListLayout")
+local ClearBtn = Instance.new("TextButton")
+
+-- Đưa giao diện vào CoreGui của Arceus X
+ScreenGui.Parent = game:GetService("CoreGui") or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+ScreenGui.ResetOnSpawn = false
+
+MainFrame.Name = "ArceusSpyFrame"
+MainFrame.Size = UDim2.new(0.85, 0, 0.35, 0)
+MainFrame.Position = UDim2.new(0.075, 0, 0.15, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+MainFrame.BorderSizePixel = 2
+MainFrame.BorderColor3 = Color3.fromRGB(0, 255, 150) -- Viền xanh neon hợp màu Arceus
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+ClearBtn.Size = UDim2.new(1, 0, 0.18, 0)
+ClearBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+ClearBtn.Text = "XÓA LỊCH SỬ LOG"
+ClearBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ClearBtn.Font = Enum.Font.SourceSansBold
+ClearBtn.TextSize = 16
+ClearBtn.Parent = MainFrame
+ClearBtn.MouseButton1Click:Connect(function()
+    for _, child in pairs(ScrollingFrame:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+end)
+
+ScrollingFrame.Size = UDim2.new(1, 0, 0.82, 0)
+ScrollingFrame.Position = UDim2.new(0, 0, 0.18, 0)
+ScrollingFrame.BackgroundTransparency = 1
+ScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+ScrollingFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollingFrame.Parent = MainFrame
+
+UIListLayout.Parent = ScrollingFrame
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Padding = UDim.new(0, 4)
+
+local function formatArgs(args)
+    local result = ""
+    for i, v in ipairs(args) do
+        if type(v) == "string" then
+            result = result .. '"' .. tostring(v) .. '"'
+        elseif type(v) == "userdata" then
+            result = result .. v:GetFullName()
+        else
+            result = result .. tostring(v)
+        end
+        if i < #args then result = result .. ", " end
+    end
+    return result
+end
+
+local function logRemote(remote, method, args)
+    local remoteName = remote.Name
+    local path = remote:GetFullName()
+    local argString = formatArgs(args)
+    
+    -- Tạo cấu trúc script chuẩn để bạn có thể dán vào tab chạy luôn
+    local scriptToCopy = string.format("game.%s:%s(%s)", path, method, argString)
+    
+    local LogBtn = Instance.new("TextButton")
+    LogBtn.Size = UDim2.new(1, -10, 0, 38)
+    LogBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    LogBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    LogBtn.Text = " [" .. method .. "] " .. remoteName
+    LogBtn.Font = Enum.Font.SourceSans
+    LogBtn.TextSize = 14
+    LogBtn.TextXAlignment = Enum.TextXAlignment.Left
+    LogBtn.Parent = ScrollingFrame
+    
+    LogBtn.MouseButton1Click:Connect(function()
+        -- Arceus X Neo hỗ trợ hàm setclipboard tiêu chuẩn
+        if setclipboard then
+            setclipboard(scriptToCopy)
+            LogBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 80)
+            LogBtn.Text = " ĐÃ COPY THÀNH CÔNG!"
+            task.delay(0.8, function()
+                LogBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+                LogBtn.Text = " [" .. method .. "] " .. remoteName
+            end)
+        else
+            LogBtn.Text = " Lỗi: Executor không hỗ trợ setclipboard!"
+        end
+    end)
+end
+
+-- Tiến hành bắt các lệnh gọi từ game lên máy chủ
+local oldFireServer
+oldFireServer = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if method == "FireServer" and self:IsA("RemoteEvent") then
+        logRemote(self, "FireServer", args)
+    elseif method == "InvokeServer" and self:IsA("RemoteFunction") then
+        logRemote(self, "InvokeServer", args)
+    end
+    
+    return oldFireServer(self, ...)
+end)
+
+print("[Arceus Spy] Đang hoạt động. Hãy thực hiện hành động trong game để lấy code.")

@@ -1,0 +1,43 @@
+local Enabled = true
+local Client = game.Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
+local VIM = game:GetService("VirtualInputManager")
+
+local set_thread_identity = (setthreadcontext or set_thread_identity or function() end)
+
+local function hold(keyCode, baseTime)
+    task.spawn(function()
+        set_thread_identity(7)
+        VIM:SendKeyEvent(true, keyCode, false, game)
+        task.wait(baseTime + (math.random(-10, 10) / 1000)) 
+        VIM:SendKeyEvent(false, keyCode, false, game)
+        set_thread_identity(2)
+    end)
+end
+
+local function dash()
+    hold(32, 0.08)
+end
+
+local function monitorEffects(child)
+    if not Enabled then return end
+    if child.Name == "AttackTrail" or child.Name == "StartupHighlight" or child.Name == "UltimateHighlight" then
+        local Creator = child:GetAttribute("Creator") or child.Parent
+        if Creator and Creator:IsA("Model") and Creator.Name ~= Client.Name then
+            local enemyRoot = Creator:FindFirstChild("HumanoidRootPart")
+            local myRoot = Client.Character and Client.Character:FindFirstChild("HumanoidRootPart")
+            if enemyRoot and myRoot then
+                if (myRoot.Position - enemyRoot.Position).Magnitude <= 11.5 then
+                    task.wait(math.random(12, 18) / 100)
+                    dash()
+                end
+            end
+        end
+    end
+end
+
+Workspace.ChildAdded:Connect(monitorEffects)
+
+for _, child in ipairs(Workspace:GetChildren()) do
+    task.spawn(monitorEffects, child)
+end

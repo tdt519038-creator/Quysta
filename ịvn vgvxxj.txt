@@ -1,0 +1,150 @@
+warn("!Started!")
+local Enabled = true
+
+-- HỆ THỐNG MENU GUI BẬT/TẮT DI ĐỘNG (MOBILE)
+local ScreenGui = Instance.new("ScreenGui")
+local ToggleButton = Instance.new("TextButton")
+local UICorner = Instance.new("UICorner")
+
+ScreenGui.Name = "AutoDashMenu"
+ScreenGui.Parent = game.CoreGui
+ScreenGui.ResetOnSpawn = false
+
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Parent = ScreenGui
+ToggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+ToggleButton.Position = UDim2.new(0.05, 0, 0.4, 0)
+ToggleButton.Size = UDim2.new(0, 90, 0, 45)
+ToggleButton.Font = Enum.Font.SourceSansBold
+ToggleButton.Text = "Auto Dash: ON"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 14.000
+ToggleButton.Active = true
+ToggleButton.Draggable = true
+
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = ToggleButton
+
+ToggleButton.MouseButton1Click:Connect(function()
+    Enabled = not Enabled
+    if Enabled then
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+        ToggleButton.Text = "Auto Dash: ON"
+    else
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+        ToggleButton.Text = "Auto Dash: OFF"
+    end
+end)
+
+-- LOGIC AUTO DASH GỐC CỦA GAME
+local set_thread_identity = setthreadcontext or set_thread_identity or setidentity or function() 
+    return print("Your exploit doesnt support this function") 
+end
+
+local Client = game.Players.LocalPlayer
+local States = workspace:WaitForChild("States")
+local Effect = require(game:GetService("ReplicatedStorage").Modules.EffectHelper)
+local VIM = game:GetService("VirtualInputManager")
+
+local function hold(keyCode, time)
+    set_thread_identity(7)
+    VIM:SendKeyEvent(true, keyCode, false, game)
+    task.wait(time)
+    VIM:SendKeyEvent(false, keyCode, false, game)
+    set_thread_identity(2)
+end
+
+local function get(n, s)
+    local pState = States:FindFirstChild(n.Name)
+    if pState then
+        local target = pState:FindFirstChild(s, true)
+        return target and target.Value
+    end
+    return nil
+end
+
+local function get_root(chr)
+    return chr and chr:FindFirstChild("HumanoidRootPart")
+end
+
+local function notif(str, str2)
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = str,
+        Text = str2,
+        Duration = 2
+    })
+end
+
+local function dash()
+    hold(Enum.KeyCode.Space, 0.1) 
+end
+
+local waiting = {}
+
+local function waitValid(name, func)
+    if not waiting[name] then 
+        waiting[name] = {} 
+    end
+    table.insert(waiting[name], func)
+    warn("Added Queue", name)
+end
+
+local function valid(name, ...)
+    if waiting[name] then
+        for _, func in ipairs(waiting[name]) do
+            task.spawn(func, ...)
+        end
+        waiting[name] = nil
+        warn("Cleared Queue", name)
+    end
+end
+
+shared.BaseEffectFunction = shared.BaseEffectFunction or {}
+
+for i, v in pairs(Effect) do
+    shared.BaseEffectFunction[i] = shared.BaseEffectFunction[i] or v
+    
+    Effect[i] = function(d, ...)
+        -- KHẲNG ĐỊNH: Nếu tắt chế độ, trả lại hàm gốc ngay lập tức để game chạy bình thường
+        if not Enabled then 
+            return shared.BaseEffectFunction[i](d, ...) 
+        end
+        
+        -- KHẲNG ĐỊNH: Bật lên sẽ chạy chuẩn cấu trúc kiểm tra để né chiêu đàng hoàng
+        if type(d) == "table" and typeof(d[2]) == "Instance" then
+            local enemyChar = d[2]
+            local localRoot = get_root(Client.Character)
+            local enemyRoot = get_root(enemyChar)
+            
+            if localRoot and enemyRoot then
+                local Distance = Client:DistanceFromCharacter(enemyRoot.Position)
+                
+                local isBlocking = get(Client, "Blocking")
+                local isEquipped = get(Client, "Equipped")
+                local isPunching = get(Client, "Punching")
+                
+                if not isBlocking and isEquipped and not isPunching then
+                    if Distance <= 10.8 and (d[1] == "AttackTrail" or d[1] == "StartupHighlight" or d[1] == "UltimateHighlight") and d[2] ~= Client.Character then
+                        
+                        if type(d[5]) == 'number' then
+                            waitValid(d[2].Name, function()
+                                local randomDelay = Random.new():NextNumber(0.4, 0.6)
+                                local formattedResult = tonumber(string.format("%.2f", randomDelay))
+                                
+                                task.wait(formattedResult)
+                                task.spawn(dash)
+                                notif("Dodged!", "Truly a master at work")
+                            end)
+                        end
+                    end
+                end
+            end
+            
+            if d[1] == "StartupHighlight" then
+                valid(d[2].Name)
+            end
+        end
+        
+        return shared.BaseEffectFunction[i](d, ...)
+    end
+end

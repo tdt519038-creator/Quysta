@@ -1,0 +1,79 @@
+warn("!Started!")
+
+Local Enabled = true
+
+local set_thread_identity (setthreadcontext or set_thread_identity or function() return print("Your exploit doesnt support this function")
+
+end)
+
+Local Client game. Players. Loca LP Layer
+
+Local States workspace: WaitForChild("States")
+
+Local Effect = require(game: GetService("Rep LicatedStorage"). Modules. EffectHelper)
+
+Local VIM game: service("Virtua LInputManager")
+
+local function hold(keyCode, time) set_thread_identity(7)
+
+end
+
+task.wait(time)
+
+VIM: SendKeyEvent(true, keyCode, false, game) VIM: SendKeyEvent (false, keyCode, false, game) set_thread_identity(2)
+
+function get(n, s)
+
+end return States[n.Name]: FindFirstChild(s, true). Value
+
+function get_root(chr) end return chr. Humanoid RootPart
+
+function notif (str, str2)
+
+game: GetService("StarterGu1"): SetCore("SendNotification", { }) end Title str, Text = str2,
+
+function dash() hold (32, 0.1)
+
+end
+
+function random() return math.random(1, 100) / 100
+
+end
+
+local waiting = {} function wait Valid (name, tunc)
+
+end
+
+if not waiting[name] then waiting [name] = {} end table.insert(waiting[name], func) warn("Added Queue", name)
+
+function valid (name,...)
+
+end
+
+for 11, #waiting[name] do end task.spawn (waiting [name] [1], ...)
+
+waiting[name] = nil warn("Cleared Queue", name)
+
+shared. BaseEffectFunction shared. BaseEffectFunction or {}for 1, v in pairs (Effect) do shared. BaseEffect Function[i] = shared. BaseEffectFunction[i] or v Effect[i] = function(d, ...) return end if type(d) == "table" and typeof(d[2]) == "Instance" then local Target get(Client, "Lockedon") local Distance =
+
+task.spawn (function() if not Enabled then
+
+Client: DistanceFromCharacter(get_root(d[2]).Position)
+
+if States [Client.Name]: FindFirstChild("Blocking", true). Value or not States [Client.Name]: FindFirstChild("Equipped", true).Value or States [Client.Name]: FindFirstChild("Punching", true).Value then return end
+
+if Distance > 10.8 then return end
+
+if (d[1] == "AttackTrail" or d[1] == "StartupHighlight" or d[1] == "UltimateHighlight") and d[2] = client.Character and type(d[5]) == 'number' then waitValid(d[2].Name function (LightAttack) end end) local delay d[5] Random.new(): NextNumber (0.4, 0.6) Local formattedResult = string.format("%.2f", delay) task.wait(tonumber (formattedResult)) coroutine.wrap(dash) () notif("dodged!", "truly master at work")
+
+end
+
+if d[1] == "StartupHighlight" then end valid(d[2].Name, not (d[3] or d[4] or d[5]))
+
+end)
+
+end
+
+return shared. BaseEffect Function [1] (d, ...)
+
+end

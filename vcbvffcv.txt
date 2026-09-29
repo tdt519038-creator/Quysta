@@ -1,0 +1,82 @@
+warn("!Started!")
+local Enabled = true
+
+-- MENU BẬT TẮT TỐI GIẢN
+local ScreenGui = Instance.new("ScreenGui")
+local ToggleButton = Instance.new("TextButton")
+local UICorner = Instance.new("UICorner")
+ScreenGui.Name = "AutoDashMenu"
+ScreenGui.Parent = game.CoreGui
+ScreenGui.ResetOnSpawn = false
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Parent = ScreenGui
+ToggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+ToggleButton.Position = UDim2.new(0.05, 0, 0.4, 0)
+ToggleButton.Size = UDim2.new(0, 90, 0, 45)
+ToggleButton.Font = Enum.Font.SourceSansBold
+ToggleButton.Text = "Auto Dash: ON"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 14.000
+ToggleButton.Active = true
+ToggleButton.Draggable = true
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = ToggleButton
+
+ToggleButton.MouseButton1Click:Connect(function()
+    Enabled = not Enabled
+    if Enabled then
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+        ToggleButton.Text = "Auto Dash: ON"
+    else
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+        ToggleButton.Text = "Auto Dash: OFF"
+    end
+end)
+
+-- LOGIC FIX LỖI CRASH KHI ĐẤM CÚ ĐẦU TIÊN
+local set_thread_identity = (setthreadcontext or set_thread_identity or setidentity or function() end)
+local Client = game.Players.LocalPlayer
+local States = workspace:WaitForChild("States")
+local Effect = require(game:GetService("ReplicatedStorage").Modules.EffectHelper)
+local VIM = game:service("VirtualInputManager")
+
+local function hold(keyCode, time)
+    set_thread_identity(7)
+    VIM:SendKeyEvent(true, keyCode, false, game)
+    task.wait(time)
+    VIM:SendKeyEvent(false, keyCode, false, game)
+    set_thread_identity(2)
+end
+
+local function dash()
+    hold(Enum.KeyCode.Space, 0.05)
+end
+
+shared.BaseEffectFunction = shared.BaseEffectFunction or {}
+for i, v in pairs(Effect) do
+    shared.BaseEffectFunction[i] = shared.BaseEffectFunction[i] or v
+    Effect[i] = function(d, ...)
+        if not Enabled then 
+            return shared.BaseEffectFunction[i](d, ...) 
+        end
+        
+        -- Kiểm tra bảng dữ liệu d an toàn tuyệt đối, không gọi hàm tính vị trí gây sập app
+        if type(d) == "table" and type(d[1]) == "string" then
+            local effectName = d[1]
+            local attacker = d[2]
+            
+            -- Chỉ xử lý khi người đấm không phải là chính bạn
+            if attacker ~= Client.Character and attacker ~= Client then
+                -- Nhận diện trực tiếp tên hiệu ứng đòn đánh của game
+                if effectName == "AttackTrail" or effectName == "StartupHighlight" or effectName == "UltimateHighlight" then
+                    
+                    -- Chạy lệnh né trên luồng phụ độc lập để luồng chính không bị khựng hình
+                    task.defer(dash)
+                    
+                end
+            end
+        end
+        
+        return shared.BaseEffectFunction[i](d, ...)
+    end
+end

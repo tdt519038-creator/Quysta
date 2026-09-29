@@ -1,0 +1,140 @@
+warn("!Started!")
+local Enabled = true
+
+-- HỆ THỐNG MENU GUI BẬT/TẮT DI ĐỘNG (MOBILE)
+local ScreenGui = Instance.new("ScreenGui")
+local ToggleButton = Instance.new("TextButton")
+local UICorner = Instance.new("UICorner")
+
+ScreenGui.Name = "AutoDashMenu"
+ScreenGui.Parent = game.CoreGui
+ScreenGui.ResetOnSpawn = false
+
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Parent = ScreenGui
+ToggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+ToggleButton.Position = UDim2.new(0.05, 0, 0.4, 0)
+ToggleButton.Size = UDim2.new(0, 90, 0, 45)
+ToggleButton.Font = Enum.Font.SourceSansBold
+ToggleButton.Text = "Auto Dash: ON"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 14.000
+ToggleButton.Active = true
+ToggleButton.Draggable = true
+
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = ToggleButton
+
+ToggleButton.MouseButton1Click:Connect(function()
+    Enabled = not Enabled
+    if Enabled then
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+        ToggleButton.Text = "Auto Dash: ON"
+    else
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+        ToggleButton.Text = "Auto Dash: OFF"
+    end
+end)
+
+-- LOGIC AUTO DASH CHỈ NÉ ĐỐI THỦ
+local set_thread_identity = setthreadcontext or set_thread_identity or setidentity or function() 
+    return print("Your exploit doesnt support this function") 
+end
+
+local Client = game.Players.LocalPlayer
+local States = workspace:WaitForChild("States")
+local Effect = require(game:GetService("ReplicatedStorage").Modules.EffectHelper)
+local VIM = game:GetService("VirtualInputManager")
+
+local lastDash = 0
+local dashCooldown = 0.35 -- Cooldown lướt ngắn để né mượt đòn combo của địch
+
+local function hold(keyCode, time)
+    set_thread_identity(7)
+    VIM:SendKeyEvent(true, keyCode, false, game)
+    task.wait(time)
+    VIM:SendKeyEvent(false, keyCode, false, game)
+    set_thread_identity(2)
+end
+
+local function get(n, s)
+    local pState = States:FindFirstChild(n.Name)
+    if pState then
+        local target = pState:FindFirstChild(s, true)
+        return target and target.Value
+    end
+    return nil
+end
+
+local function get_root(chr)
+    return chr and chr:FindFirstChild("HumanoidRootPart")
+end
+
+local function notif(str, str2)
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = str,
+        Text = str2,
+        Duration = 1
+    })
+end
+
+local function dash()
+    if tick() - lastDash >= dashCooldown then
+        lastDash = tick()
+        hold(Enum.KeyCode.Space, 0.05)
+    end
+end
+
+shared.BaseEffectFunction = shared.BaseEffectFunction or {}
+
+for i, v in pairs(Effect) do
+    shared.BaseEffectFunction[i] = shared.BaseEffectFunction[i] or v
+    
+    Effect[i] = function(d, ...)
+        if not Enabled then 
+            return shared.BaseEffectFunction[i](d, ...) 
+        end
+        
+        -- Kiểm tra d[1] và d[2] đúng cấu trúc mảng gốc
+        if type(d) == "table" and typeof(d[2]) == "Instance" then
+            local enemyChar = d[2]
+            
+            -- CHỐNG TỰ NÉ: Nếu người tạo ra hiệu ứng đấm chính là BẢN THÂN thì BỎ QUA NGAY
+            if enemyChar == Client.Character then 
+                return shared.BaseEffectFunction[i](d, ...) 
+            end
+            
+            local localRoot = get_root(Client.Character)
+            local enemyRoot = get_root(enemyChar)
+            
+            if localRoot and enemyRoot then
+                local Distance = Client:DistanceFromCharacter(enemyRoot.Position)
+                
+                local isBlocking = get(Client, "Blocking")
+                local isEquipped = get(Client, "Equipped")
+                local isPunching = get(Client, "Punching")
+                
+                -- Chỉ lướt né khi bản thân không trong trạng thái đấm hoặc đỡ
+                if not isBlocking and isEquipped and not isPunching then
+                    -- Kiểm tra nếu đối thủ ở cự ly gần và d[1] là hiệu ứng đấm của địch
+                    if Distance <= 12 and (d[1] == "AttackTrail" or d[1] == "StartupHighlight" or d[1] == "UltimateHighlight") then
+                        
+                        task.defer(function()
+                            if tick() - lastDash >= dashCooldown then
+                                -- Độ trễ siêu nhỏ ngẫu nhiên (0.05 - 0.12 giây) để né hợp lệ và mượt mà
+                                local delayTime = 0.05 + (math.random(1, 7) / 100)
+                                task.wait(delayTime)
+                                
+                                dash()
+                                notif("Dodged!", "Enemy Attacked")
+                            end
+                        end)
+                        
+                    end
+                end
+            end
+        end
+        
+        return shared.BaseEffectFunction[i](d, ...)
+    end
+end

@@ -1,0 +1,105 @@
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+local ReplicatedStorage = game.ReplicatedStorage
+
+if getgenv().dodge then getgenv().dodge:Disconnect() end
+if getgenv().dodgeChar then getgenv().dodgeChar:Disconnect() end
+
+local function getState(plrName)
+    local states = game.Workspace:FindFirstChild("States")
+    return states and states:FindFirstChild(plrName)
+end
+
+local function getOpponent()
+    local state = getState(player.Name)
+    if not state then return nil end
+    local occupied = state:FindFirstChild("Occupied")
+    local locked = occupied and occupied:FindFirstChild("LockedOn")
+    return locked and locked.Value
+end
+
+local function dashing()
+    local state = getState(player.Name)
+    local occupied = state and state:FindFirstChild("Occupied")
+    local dash = occupied and occupied:FindFirstChild("Dashing")
+    return dash and dash.Value or false
+end
+
+local function getPunchDirection(opponentChar)
+    if not opponentChar then return nil end
+    local humanoid = opponentChar:FindFirstChildOfClass("Humanoid")
+    local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+    
+    if animator then
+        for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+            local animName = string.lower(track.Animation.Name or "")
+            if string.find(animName, "left") or string.find(animName, "m1") then
+                return "Right"
+            elseif string.find(animName, "right") or string.find(animName, "m2") then
+                return "Left"
+            end
+        end
+    end
+    
+    local oppRoot = opponentChar:FindFirstChild("HumanoidRootPart")
+    local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if oppRoot and myRoot then
+        local relPos = oppRoot.CFrame:PointToObjectSpace(myRoot.Position)
+        return relPos.X > 0 and "Left" or "Right"
+    end
+    return nil
+end
+
+local isDodgeThrottled = false
+local function dodge()
+    if isDodgeThrottled or dashing() then return end
+    
+    local character = player.Character
+    if not character then return end
+
+    local opponent = getOpponent()
+    if not opponent then return end
+
+    if opponent:GetAttribute("IsFeinting") == true or opponent:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local oppState = getState(opponent.Name)
+    local oppOccupied = oppState and oppState:FindFirstChild("Occupied")
+    local oppAttacking = oppOccupied and (oppOccupied:FindFirstChild("Attacking") or oppOccupied:FindFirstChild("Swing"))
+    
+    if oppAttacking and oppAttacking.Value == false then
+        return 
+    end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+    if root and eroot then
+        if (root.Position - eroot.Position).Magnitude > 13 then
+            return
+        end
+    end
+
+    local direction = getPunchDirection(opponent)
+    if not direction then return end
+
+    local events = ReplicatedStorage:FindFirstChild("Events")
+    local dash = events and events:FindFirstChild("ForceDash")
+    if not dash then return end
+
+    isDodgeThrottled = true
+    dash:Fire({Direction = direction})
+    
+    task.delay(0.25, function()
+        isDodgeThrottled = false
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function()
+    if not player.Character then return end
+    dodge()
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    isDodgeThrottled = false
+end)

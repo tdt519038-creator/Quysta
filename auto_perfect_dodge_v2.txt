@@ -1,0 +1,165 @@
+--// Untitled Boxing Game | Auto Perfect Dodge v2
+--// Based on original by CDHW/Kohrynth | Optimized
+
+local player     = game.Players.LocalPlayer
+local RS         = game.RunService
+local RepStorage = game.ReplicatedStorage
+local Workspace  = game.Workspace
+
+-- Cleanup connection cũ
+for _, key in ipairs({"dodge", "dodgeChar"}) do
+    if getgenv()[key] then
+        getgenv()[key]:Disconnect()
+        getgenv()[key] = nil
+    end
+end
+
+-- Cache ForceDash event một lần
+local dashEvent do
+    local ev = RepStorage:FindFirstChild("Events")
+    dashEvent = ev and ev:FindFirstChild("ForceDash")
+end
+
+--[[
+╔══════════════════════════════════════════════════════════╗
+║              LOGIC PERFECT DODGE                         ║
+║                                                          ║
+║  Đối thủ đánh tay TRÁI                                  ║
+║    → Đòn bay đến bên PHẢI của mình                      ║
+║    → Né sang bên PHẢI (cùng hướng đòn đến)              ║
+║    → NeededDirection = "Left"  →  né "Right"            ║
+║                                                          ║
+║  Đối thủ đánh tay PHẢI                                  ║
+║    → Đòn bay đến bên TRÁI của mình                      ║
+║    → Né sang bên TRÁI (cùng hướng đòn đến)              ║
+║    → NeededDirection = "Right"  →  né "Left"            ║
+║                                                          ║
+║  NeededDirection = hướng TAY đối thủ (góc nhìn server)  ║
+║  PD direction    = NGƯỢC lại với NeededDirection        ║
+║                  = cùng hướng đòn bay đến mình          ║
+╚══════════════════════════════════════════════════════════╝
+--]]
+
+-- Bảng đổi hướng: tay trái → né phải, tay phải → né trái
+local PD_DIR = { Left = "Right", Right = "Left" }
+
+local lastPerfect
+
+-- Lấy Occupied node của mình từ States
+local function getOccupied()
+    local states = Workspace:FindFirstChild("States")
+    if not states then return nil end
+    local state = states:FindFirstChild(player.Name)
+    if not state then return nil end
+    return state:FindFirstChild("Occupied")
+end
+
+-- Kiểm tra đang dash chưa
+local function isDashing(occupied)
+    local d = occupied:FindFirstChild("Dashing")
+    return d and d.Value == true
+end
+
+-- Tự re-fetch nếu dashEvent bị nil (load muộn hoặc sau respawn)
+local function getDashEvent()
+    if not dashEvent then
+        local ev = RepStorage:FindFirstChild("Events")
+        dashEvent = ev and ev:FindFirstChild("ForceDash")
+    end
+    return dashEvent
+end
+
+-- Thử fire lại, dùng cho các retry frame
+local function tryFire(pdDir, character, perfect, occupied)
+    if player.Character ~= character then return end
+    if character:GetAttribute("Perfect") ~= perfect then return end
+    if isDashing(occupied) then return end
+    local ev = getDashEvent()
+    if ev then ev:Fire({Direction = pdDir}) end
+end
+
+-- Hàm chính: gọi mỗi khi attribute "Perfect" thay đổi
+local function onPerfectChanged()
+    local character = player.Character
+    if not character then return end
+
+    local perfect = character:GetAttribute("Perfect")
+    -- Bỏ qua nếu nil hoặc đây là cùng một window trước rồi
+    if perfect == nil or perfect == lastPerfect then return end
+
+    -- Chỉ xử lý Left / Right, bỏ Forward / Backward
+    local neededDir = character:GetAttribute("NeededDirection")
+    if neededDir ~= "Left" and neededDir ~= "Right" then return end
+
+    -- Tính hướng PD: ngược hướng tay đối thủ = cùng hướng đòn đến mình
+    -- Tay trái  → "Left"  → né "Right" ✓
+    -- Tay phải  → "Right" → né "Left"  ✓
+    local pdDir = PD_DIR[neededDir]
+
+    local occupied = getOccupied()
+    if not occupied then return end
+
+    -- Lấy đối thủ đang bị lock on
+    local locked   = occupied:FindFirstChild("LockedOn")
+    local opponent = locked and locked.Value
+    if not opponent then return end
+
+    -- Bỏ qua khi đối thủ đang feint để tránh bị bẫy
+    if opponent:GetAttribute("IsFeinting") == true
+    or opponent:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    -- Bỏ qua khi đối thủ quá xa (trên 14 studs)
+    local root  = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+    if root and eroot and (root.Position - eroot.Position).Magnitude > 4 then
+        return
+    end
+
+    -- Đang trong dash rồi thì không fire chồng
+    if isDashing(occupied) then return end
+
+    local ev = getDashEvent()
+    if not ev then return end
+
+    -- Lưu window này lại để không fire lại
+    lastPerfect = perfect
+
+    -- Lần 1: fire ngay lập tức
+    ev:Fire({Direction = pdDir})
+
+    -- Lần 2: frame kế tiếp (retry nếu lần 1 bị miss)
+    RS.Heartbeat:Once(function()
+        tryFire(pdDir, character, perfect, occupied)
+        -- Lần 3: frame tiếp theo nữa (lồng nhau, không song song)
+        RS.Heartbeat:Once(function()
+            tryFire(pdDir, character, perfect, occupied)
+        end)
+    end)
+end
+
+-- Bind signal cho character
+local function setupCharacter(character)
+    if getgenv().dodge then
+        getgenv().dodge:Disconnect()
+    end
+    -- GetAttributeChangedSignal: kích hoạt đúng lúc, không poll mỗi frame
+    getgenv().dodge = character:GetAttributeChangedSignal("Perfect"):Connect(onPerfectChanged)
+end
+
+-- Setup ngay nếu đang mid-game
+if player.Character then
+    setupCharacter(player.Character)
+end
+
+-- Setup lại mỗi khi respawn
+getgenv().dodgeChar = player.CharacterAdded:Connect(function(character)
+    lastPerfect = nil
+    -- Reset cache sau khi respawn
+    local ev = RepStorage:FindFirstChild("Events")
+    dashEvent = ev and ev:FindFirstChild("ForceDash")
+    -- Chờ HumanoidRootPart tồn tại rồi mới bind
+    character:WaitForChild("HumanoidRootPart")
+    setupCharacter(character)
+end)

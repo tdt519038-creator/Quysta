@@ -1,0 +1,368 @@
+--// Created By CDHW/Kohrynth
+--// Untitled Boxing Game | Auto Dodge
+
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+local ReplicatedStorage = game.ReplicatedStorage
+
+local lastPerfect
+local dodgePending = false
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+local function getState()
+    local states = game.Workspace:FindFirstChild("States")
+
+    if not states then
+        return
+    end
+
+    return states:FindFirstChild(player.Name)
+end
+
+local function getOpponent()
+    local state = getState()
+
+    if not state then
+        return
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return
+    end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+
+    if locked then
+        return locked.Value
+    end
+end
+
+local function dashing()
+    local state = getState()
+
+    if not state then
+        return false
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return false
+    end
+
+    local dash = occupied:FindFirstChild("Dashing")
+
+    if dash then
+        return dash.Value
+    end
+
+    return false
+end
+
+----------------------------------------------------------------
+-- SCAN BOTH SIDES BEFORE CHOOSING A DODGE DIRECTION
+-- Scores the opponent's moving arms in the player's left/right frame.
+----------------------------------------------------------------
+
+local ARM_SCAN_WINDOW = 0.12
+local ARM_SAMPLE_INTERVAL = 0.01
+local ARM_MIN_INCOMING_SPEED = 0.75
+local ARM_SIDE_ADVANTAGE = 0.10
+local ARM_SIDE_DEADZONE = 0.08
+local DODGE_SCAN_DELAY = 0.05
+
+local armSamples = {}
+local armSampleClock = 0
+
+local function findArmPart(character, side)
+    local names
+
+    if side == "Left" then
+        names = {"LeftHand", "LeftLowerArm", "LeftUpperArm", "Left Arm"}
+    else
+        names = {"RightHand", "RightLowerArm", "RightUpperArm", "Right Arm"}
+    end
+
+    for _, name in ipairs(names) do
+        local part = character:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            return part
+        end
+    end
+end
+
+local function clearArmSamples()
+    table.clear(armSamples)
+end
+
+local function sampleOpponentArms(opponent)
+    local character = player.Character
+    local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
+    local enemyRoot = opponent and opponent:FindFirstChild("HumanoidRootPart")
+
+    if not playerRoot or not enemyRoot then
+        return
+    end
+
+    local left = findArmPart(opponent, "Left")
+    local right = findArmPart(opponent, "Right")
+    local now = os.clock()
+
+    armSamples[#armSamples + 1] = {
+        Time = now,
+        PlayerPosition = playerRoot.Position,
+        PlayerRightVector = playerRoot.CFrame.RightVector,
+        Left = left and left.Position,
+        Right = right and right.Position,
+    }
+
+    local cutoff = now - ARM_SCAN_WINDOW
+    while armSamples[1] and armSamples[1].Time < cutoff do
+        table.remove(armSamples, 1)
+    end
+end
+
+local function scanIncomingArm(character, opponent)
+    local playerRoot = character:FindFirstChild("HumanoidRootPart")
+    local enemyRoot = opponent:FindFirstChild("HumanoidRootPart")
+
+    if not playerRoot or not enemyRoot or #armSamples < 2 then
+        return nil
+    end
+
+    local first = armSamples[1]
+    local last = armSamples[#armSamples]
+    local elapsed = last.Time - first.Time
+
+    if elapsed <= 0 or not first.PlayerPosition or not last.PlayerPosition then
+        return nil
+    end
+
+    local playerRight = last.PlayerRightVector or playerRoot.CFrame.RightVector
+    local leftScore = 0
+    local rightScore = 0
+
+    local function scoreArm(positionA, positionB)
+        if not positionA or not positionB then
+            return 0, 0
+        end
+
+        -- Compare each arm relative to the player, not relative to the opponent.
+        local relativeA = positionA - first.PlayerPosition
+        local relativeB = positionB - last.PlayerPosition
+        local distance = relativeB.Magnitude
+
+        if distance <= 0.001 then
+            return 0, 0
+        end
+
+        local relativeVelocity = (relativeB - relativeA) / elapsed
+        local incomingSpeed = -relativeVelocity:Dot(relativeB.Unit)
+
+        -- Ignore an arm that is not moving meaningfully toward the player.
+        if incomingSpeed < ARM_MIN_INCOMING_SPEED then
+            return 0, 0
+        end
+
+        -- Positive lateral position is the player's right; negative is the player's left.
+        local lateral = relativeB:Dot(playerRight)
+        local lateralSpeed = relativeVelocity:Dot(playerRight)
+        local scoreValue = incomingSpeed * math.max(math.abs(lateral), ARM_SIDE_DEADZONE)
+
+        if lateral > ARM_SIDE_DEADZONE then
+            return 0, scoreValue + math.max(0, lateralSpeed) * 0.15
+        elseif lateral < -ARM_SIDE_DEADZONE then
+            return scoreValue + math.max(0, -lateralSpeed) * 0.15, 0
+        elseif lateralSpeed > 0 then
+            return 0, scoreValue + lateralSpeed * 0.15
+        elseif lateralSpeed < 0 then
+            return scoreValue + -lateralSpeed * 0.15, 0
+        end
+
+        return 0, 0
+    end
+
+    local leftFromLeftArm, rightFromLeftArm = scoreArm(first.Left, last.Left)
+    local leftFromRightArm, rightFromRightArm = scoreArm(first.Right, last.Right)
+    leftScore = leftFromLeftArm + leftFromRightArm
+    rightScore = rightFromLeftArm + rightFromRightArm
+
+    if leftScore <= 0 and rightScore <= 0 then
+        return nil
+    end
+
+    -- Require a clear winner so small animation jitter does not flip the decision.
+    if rightScore > leftScore * (1 + ARM_SIDE_ADVANTAGE) then
+        return "Right"
+    elseif leftScore > rightScore * (1 + ARM_SIDE_ADVANTAGE) then
+        return "Left"
+    end
+
+    return nil
+end
+
+local function forceMovementBeforeDodge(character, direction)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or not direction then
+        return
+    end
+
+    local moveDirection
+
+    if direction == "Left" then
+        moveDirection = -root.CFrame.RightVector
+    elseif direction == "Right" then
+        moveDirection = root.CFrame.RightVector
+    elseif direction == "Forward" then
+        moveDirection = root.CFrame.LookVector
+    elseif direction == "Backward" then
+        moveDirection = -root.CFrame.LookVector
+    end
+
+    if moveDirection then
+        -- Equivalent to forcing the player's movement direction,
+        -- without teleporting or changing CFrame/Position.
+        humanoid:Move(moveDirection, false)
+    end
+end
+
+local function dodge()
+    local character = player.Character
+
+    if not character or dodgePending then
+        return
+    end
+
+    local perfect = character:GetAttribute("Perfect")
+    if perfect == nil or perfect == lastPerfect then
+        return
+    end
+
+    local direction = character:GetAttribute("NeededDirection")
+    if direction ~= "Left" and direction ~= "Right" and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local opponent = getOpponent()
+    if not opponent then
+        return
+    end
+
+    if opponent:GetAttribute("IsFeinting") == true or opponent:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+    if not root or not eroot or (root.Position - eroot.Position).Magnitude > 5 then
+        return
+    end
+
+    if dashing() then
+        return
+    end
+
+    local events = ReplicatedStorage:FindFirstChild("Events")
+    local dash = events and events:FindFirstChild("ForceDash")
+    if not dash then
+        return
+    end
+
+    -- Prevent duplicate scans while this attack is being evaluated.
+    -- lastPerfect is updated only when a dodge is actually sent.
+    dodgePending = true
+
+    task.spawn(function()
+        -- Briefly keep sampling so the scan can compare both sides of the attack.
+        task.wait(DODGE_SCAN_DELAY)
+
+        if player.Character ~= character or character:GetAttribute("Perfect") ~= perfect then
+            dodgePending = false
+            return
+        end
+
+        local currentOpponent = getOpponent()
+        if currentOpponent ~= opponent
+            or opponent:GetAttribute("IsFeinting") == true
+            or opponent:GetAttribute("LocalIsFeinting") == true
+            or dashing() then
+            dodgePending = false
+            return
+        end
+
+        root = character:FindFirstChild("HumanoidRootPart")
+        eroot = opponent:FindFirstChild("HumanoidRootPart")
+        if not root or not eroot or (root.Position - eroot.Position).Magnitude > 5 then
+            dodgePending = false
+            return
+        end
+
+        -- Decide only after scanning both arms. If the scan is ambiguous, retain
+        -- the game's NeededDirection as a fallback.
+        local scannedDirection = scanIncomingArm(character, opponent)
+        if scannedDirection then
+            direction = scannedDirection
+        end
+
+        if not dash.Parent then
+            dodgePending = false
+            return
+        end
+
+        lastPerfect = perfect
+        forceMovementBeforeDodge(character, direction)
+        dash:Fire({Direction = direction})
+
+        RS.Heartbeat:Once(function()
+            if player.Character == character
+                and character:GetAttribute("Perfect") == perfect
+                and not dashing() then
+                dash:Fire({Direction = direction})
+            end
+        end)
+
+        RS.Heartbeat:Once(function()
+            if player.Character == character
+                and character:GetAttribute("Perfect") == perfect
+                and not dashing() then
+                dash:Fire({Direction = direction})
+            end
+        end)
+
+        dodgePending = false
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function(dt)
+    if not player.Character then
+        clearArmSamples()
+        return
+    end
+
+    armSampleClock = armSampleClock + dt
+
+    if armSampleClock >= ARM_SAMPLE_INTERVAL then
+        armSampleClock = 0
+        sampleOpponentArms(getOpponent())
+    end
+
+    dodge()
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+    dodgePending = false
+    armSampleClock = 0
+    clearArmSamples()
+end)

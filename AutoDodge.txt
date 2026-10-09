@@ -1,0 +1,395 @@
+--// Created By CDHW/Kohrynth
+--// Untitled Boxing Game | Auto Dodge
+
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+local ReplicatedStorage = game.ReplicatedStorage
+
+local lastPerfect
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+local function getState()
+    local states = game.Workspace:FindFirstChild("States")
+
+    if not states then
+        return
+    end
+
+    return states:FindFirstChild(player.Name)
+end
+
+local function getOpponent()
+    local state = getState()
+
+    if not state then
+        return
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return
+    end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+
+    if locked then
+        return locked.Value
+    end
+end
+
+local function dashing()
+    local state = getState()
+
+    if not state then
+        return false
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return false
+    end
+
+    local dash = occupied:FindFirstChild("Dashing")
+
+    if dash then
+        return dash.Value
+    end
+
+    return false
+end
+
+----------------------------------------------------------------
+-- IMPROVEMENT: PRE-SCAN OPPONENT ARM MOVEMENT
+-- The original code below remains unchanged.
+----------------------------------------------------------------
+
+local ARM_SCAN_WINDOW = 0.10
+local ARM_SAMPLE_INTERVAL = 0.01
+local ARM_MIN_INCOMING_SPEED = 1.0
+local ARM_SIDE_ADVANTAGE = 0.10
+
+local armSamples = {}
+local armSampleClock = 0
+
+local function findArmPart(character, side)
+    local names
+
+    if side == "Left" then
+        names = {"LeftHand", "LeftLowerArm", "LeftUpperArm", "Left Arm"}
+    else
+        names = {"RightHand", "RightLowerArm", "RightUpperArm", "Right Arm"}
+    end
+
+    for _, name in ipairs(names) do
+        local part = character:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            return part
+        end
+    end
+end
+
+local function clearArmSamples()
+    table.clear(armSamples)
+end
+
+local function sampleOpponentArms(opponent)
+    if not opponent then
+        return
+    end
+
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+    if not eroot then
+        return
+    end
+
+    local left = findArmPart(opponent, "Left")
+    local right = findArmPart(opponent, "Right")
+    local now = os.clock()
+
+    armSamples[#armSamples + 1] = {
+        Time = now,
+        Root = eroot.Position,
+        RightVector = eroot.CFrame.RightVector,
+        Left = left and left.Position,
+        Right = right and right.Position,
+    }
+
+    local cutoff = now - ARM_SCAN_WINDOW
+
+    while armSamples[1] and armSamples[1].Time < cutoff do
+        table.remove(armSamples, 1)
+    end
+end
+
+local function scanIncomingArm(character, opponent)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+
+    if not root or not eroot or #armSamples < 2 then
+        return nil
+    end
+
+    local first = armSamples[1]
+    local last = armSamples[#armSamples]
+    local elapsed = last.Time - first.Time
+
+    if elapsed <= 0 then
+        return nil
+    end
+
+    local toPlayer = root.Position - eroot.Position
+
+    if toPlayer.Magnitude <= 0.001 then
+        return nil
+    end
+
+    local forward = toPlayer.Unit
+    local rightVector = eroot.CFrame.RightVector
+
+    local leftScore = 0
+    local rightScore = 0
+
+    local function score(positionA, positionB)
+        if not positionA or not positionB then
+            return 0, 0
+        end
+
+        local velocity = (positionB - positionA) / elapsed
+        local incomingSpeed = velocity:Dot(forward)
+
+        if incomingSpeed < ARM_MIN_INCOMING_SPEED then
+            return 0, 0
+        end
+
+        local lateral = (positionB - eroot.Position):Dot(rightVector)
+
+        if lateral < 0 then
+            return incomingSpeed, 0
+        end
+
+        return 0, incomingSpeed
+    end
+
+    local leftA, leftB = score(first.Left, last.Left)
+    local rightA, rightB = score(first.Right, last.Right)
+
+    leftScore = leftScore + leftA + rightA * 0
+    rightScore = rightScore + rightB + leftB * 0
+
+    if leftScore <= 0 and rightScore <= 0 then
+        return nil
+    end
+
+    if leftScore > rightScore then
+        if rightScore > 0
+            and leftScore < rightScore * (1 + ARM_SIDE_ADVANTAGE) then
+            return nil
+        end
+
+        -- Đối thủ đưa bên trái về phía mình -> né phải.
+        return "Right"
+    end
+
+    if leftScore > 0
+        and rightScore < leftScore * (1 + ARM_SIDE_ADVANTAGE) then
+        return nil
+    end
+
+    -- Đối thủ đưa bên phải về phía mình -> né trái.
+    return "Left"
+end
+local function getClosestOpponentBodyPart(character, opponent)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return
+    end
+
+    local closestPart
+    local closestDistance = math.huge
+
+    for _, part in ipairs(opponent:GetDescendants()) do
+        if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+            local distance = (part.Position - root.Position).Magnitude
+
+            if distance < closestDistance then
+                closestDistance = distance
+                closestPart = part
+            end
+        end
+    end
+
+    return closestPart
+end
+
+local function getOppositeMovementDirection(character, opponent)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+
+    if not root or not eroot then
+        return
+    end
+
+    local closestPart = getClosestOpponentBodyPart(character, opponent)
+
+    if not closestPart then
+        return
+    end
+
+    -- Determine which side of the opponent the closest body part is on.
+    local localSide = (closestPart.Position - eroot.Position):Dot(eroot.CFrame.RightVector)
+
+    -- Right side of opponent -> move toward the right-side body part.
+    if localSide > 0 then
+        return "Right"
+    end
+
+    -- Left side of opponent -> move toward the left-side body part.
+    if localSide < 0 then
+        return "Left"
+    end
+
+    return
+end
+
+local function forceMovementBeforeDodge(character, direction)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or not direction then
+        return
+    end
+
+    local moveDirection
+
+    if direction == "Left" then
+        moveDirection = -root.CFrame.RightVector
+    elseif direction == "Right" then
+        moveDirection = root.CFrame.RightVector
+    elseif direction == "Forward" then
+        moveDirection = root.CFrame.LookVector
+    elseif direction == "Backward" then
+        moveDirection = -root.CFrame.LookVector
+    end
+
+    if moveDirection then
+        -- Equivalent to forcing the player's movement direction,
+        -- without teleporting or changing CFrame/Position.
+        humanoid:Move(moveDirection, false)
+    end
+end
+
+local function dodge()
+    local character = player.Character
+
+    if not character then
+        return
+    end
+
+    local perfect = character:GetAttribute("Perfect")
+
+    if perfect == nil or perfect == lastPerfect then
+        return
+    end
+
+    local direction = character:GetAttribute("NeededDirection")
+
+    if direction ~= "Left" and direction ~= "Right" and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local opponent = getOpponent()
+
+    if not opponent then
+        return
+    end
+
+    if opponent:GetAttribute("IsFeinting") == true or opponent:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+
+    if root and eroot then
+        if (root.Position - eroot.Position).Magnitude > 5 then
+            return
+        end
+    end
+
+    if dashing() then
+        return
+    end
+
+    local events = ReplicatedStorage:FindFirstChild("Events")
+    local dash = events and events:FindFirstChild("ForceDash")
+
+    if not dash then
+        return
+    end
+
+    -- After attack detection, first find the opponent body part
+    -- that is physically closest to the player.
+    local closestDirection = getOppositeMovementDirection(character, opponent)
+
+    if closestDirection then
+        direction = closestDirection
+    else
+        local scannedDirection = scanIncomingArm(character, opponent)
+
+        if scannedDirection then
+            direction = scannedDirection
+        end
+    end
+
+    lastPerfect = perfect
+
+    -- Step 1: force the player's movement direction first.
+    forceMovementBeforeDodge(character, direction)
+
+    -- Step 2: immediately use the game's normal ForceDash.
+    -- No teleport/CFrame/Position manipulation is used.
+    dash:Fire({Direction = direction})
+
+    RS.Heartbeat:Once(function()
+        if player.Character == character and character:GetAttribute("Perfect") == perfect and not dashing() then
+            dash:Fire({Direction = direction})
+        end
+    end)
+
+    RS.Heartbeat:Once(function()
+        if player.Character == character and character:GetAttribute("Perfect") == perfect and not dashing() then
+            dash:Fire({Direction = direction})
+        end
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function(dt)
+    if not player.Character then
+        clearArmSamples()
+        return
+    end
+
+    armSampleClock = armSampleClock + dt
+
+    if armSampleClock >= ARM_SAMPLE_INTERVAL then
+        armSampleClock = 0
+        sampleOpponentArms(getOpponent())
+    end
+
+    dodge()
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+    armSampleClock = 0
+    clearArmSamples()
+end)

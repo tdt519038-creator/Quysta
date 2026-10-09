@@ -1,0 +1,293 @@
+--// Created By CDHW/Kohrynth
+--// Untitled Boxing Game | Auto Dodge
+
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+local ReplicatedStorage = game.ReplicatedStorage
+local CAS = game:GetService("ContextActionService")
+
+local lastPerfect
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+local function getState()
+    local states = game.Workspace:FindFirstChild("States")
+
+    if not states then
+        return
+    end
+
+    return states:FindFirstChild(player.Name)
+end
+
+local function getOpponent()
+    local state = getState()
+
+    if not state then
+        return
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return
+    end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+
+    if locked then
+        return locked.Value
+    end
+end
+
+local function dashing()
+    local state = getState()
+
+    if not state then
+        return false
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return false
+    end
+
+    local dash = occupied:FindFirstChild("Dashing")
+
+    if dash then
+        return dash.Value
+    end
+
+    return false
+end
+
+----------------------------------------------------------------
+-- THÊM: Khóa di chuyển + Scan chi thể + Cưỡng ép move
+-- Toàn bộ code gốc không thay đổi gì cả.
+----------------------------------------------------------------
+
+local SCAN_WINDOW        = 0.10  -- giữ mẫu 100ms gần nhất
+local SAMPLE_INTERVAL    = 0.01  -- lấy mẫu mỗi 10ms
+local MIN_INCOMING_SPEED = 0.5   -- tốc độ tối thiểu tính là "đang lao vào"
+
+local partSamples = {}
+local sampleClock = 0
+
+-- Khóa WASD + phím mũi tên của người chơi (priority 9999 để sink trước mọi thứ)
+local function lockPlayerMovement()
+    CAS:BindActionAtPriority(
+        "AutoDodgeLock",
+        function() return Enum.ContextActionResult.Sink end,
+        false,
+        9999,
+        Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D,
+        Enum.KeyCode.Up, Enum.KeyCode.Down, Enum.KeyCode.Left, Enum.KeyCode.Right
+    )
+end
+
+-- Mở lại di chuyển bình thường
+local function unlockPlayerMovement()
+    CAS:UnbindAction("AutoDodgeLock")
+end
+
+-- Tìm tay/cánh tay đối thủ (R6 và R15)
+local function findLimbs(character)
+    local list = {}
+    local names = {
+        "LeftHand",  "LeftLowerArm",  "LeftUpperArm",  "Left Arm",
+        "RightHand", "RightLowerArm", "RightUpperArm", "Right Arm",
+    }
+    for _, name in ipairs(names) do
+        local part = character:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            list[#list + 1] = { Name = name, Part = part }
+        end
+    end
+    return list
+end
+
+-- Lưu snapshot vị trí chi thể, xóa mẫu cũ
+local function sampleLimbs(opponent)
+    if not opponent then return end
+    local now  = os.clock()
+    local snap = { Time = now, Pos = {} }
+    for _, info in ipairs(findLimbs(opponent)) do
+        snap.Pos[info.Name] = info.Part.Position
+    end
+    partSamples[#partSamples + 1] = snap
+    local cutoff = now - SCAN_WINDOW
+    while partSamples[1] and partSamples[1].Time < cutoff do
+        table.remove(partSamples, 1)
+    end
+end
+
+-- Tìm chi thể đang lao vào nhanh nhất → xác định bên từ góc nhìn người chơi
+-- Ví dụ: địch đánh tay trái → bàn tay ở bên PHẢI người chơi → trả về "Right"
+local function getMostIncomingSide(character, opponent)
+    local root  = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+    if not root or not eroot or #partSamples < 2 then return nil end
+
+    local first   = partSamples[1]
+    local last    = partSamples[#partSamples]
+    local elapsed = last.Time - first.Time
+    if elapsed <= 0 then return nil end
+
+    local toPlayer = root.Position - eroot.Position
+    if toPlayer.Magnitude < 0.001 then return nil end
+    local incomingDir = toPlayer.Unit
+
+    local bestSpeed = MIN_INCOMING_SPEED
+    local bestPos   = nil
+
+    for partName, lastPos in pairs(last.Pos) do
+        local firstPos = first.Pos[partName]
+        if firstPos then
+            local vel   = (lastPos - firstPos) / elapsed
+            local speed = vel:Dot(incomingDir)
+            if speed > bestSpeed then
+                bestSpeed = speed
+                bestPos   = lastPos
+            end
+        end
+    end
+
+    if not bestPos then return nil end
+
+    local lateral = (bestPos - root.Position):Dot(root.CFrame.RightVector)
+    if lateral > 0 then return "Right"
+    elseif lateral < 0 then return "Left"
+    end
+    return nil
+end
+
+-- Cưỡng ép Humanoid di chuyển về một bên
+local function forceMovement(character, side)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root     = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root then return end
+
+    local dir
+    if side == "Right" then
+        dir =  root.CFrame.RightVector
+    elseif side == "Left" then
+        dir = -root.CFrame.RightVector
+    end
+
+    if dir then
+        humanoid:Move(dir, false)
+    end
+end
+
+----------------------------------------------------------------
+
+local function dodge()
+    local character = player.Character
+
+    if not character then
+        return
+    end
+
+    local perfect = character:GetAttribute("Perfect")
+
+    if perfect == nil or perfect == lastPerfect then
+        return
+    end
+
+    local direction = character:GetAttribute("NeededDirection")
+
+    if direction ~= "Left" and direction ~= "Right" and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local opponent = getOpponent()
+
+    if not opponent then
+        return
+    end
+
+    if opponent:GetAttribute("IsFeinting") == true or opponent:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = opponent:FindFirstChild("HumanoidRootPart")
+
+    if root and eroot then
+        if (root.Position - eroot.Position).Magnitude > 5 then
+            return
+        end
+    end
+
+    if dashing() then
+        return
+    end
+
+    local events = ReplicatedStorage:FindFirstChild("Events")
+    local dash = events and events:FindFirstChild("ForceDash")
+
+    if not dash then
+        return
+    end
+
+    lastPerfect = perfect
+
+    -- 1. Khóa di chuyển người chơi ngay lập tức
+    lockPlayerMovement()
+
+    -- 2. Cưỡng ép di chuyển về phía nắm đấm đang lao tới
+    local incomingSide = getMostIncomingSide(character, opponent)
+    if incomingSide then
+        forceMovement(character, incomingSide)
+    end
+
+    -- 3. Fire dodge
+    dash:Fire({Direction = direction})
+
+    -- 4. Mở lại di chuyển sau đúng 1 frame
+    RS.Heartbeat:Once(function()
+        unlockPlayerMovement()
+    end)
+
+    RS.Heartbeat:Once(function()
+        if player.Character == character and character:GetAttribute("Perfect") == perfect and not dashing() then
+            dash:Fire({Direction = direction})
+        end
+    end)
+
+    RS.Heartbeat:Once(function()
+        if player.Character == character and character:GetAttribute("Perfect") == perfect and not dashing() then
+            dash:Fire({Direction = direction})
+        end
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function(dt)
+    if not player.Character then
+        table.clear(partSamples)
+        return
+    end
+
+    sampleClock = sampleClock + dt
+
+    if sampleClock >= SAMPLE_INTERVAL then
+        sampleClock = 0
+        sampleLimbs(getOpponent())
+    end
+
+    dodge()
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+    sampleClock = 0
+    table.clear(partSamples)
+    unlockPlayerMovement()  -- đảm bảo unlock khi respawn
+end)

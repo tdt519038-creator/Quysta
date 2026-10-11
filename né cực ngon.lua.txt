@@ -1,0 +1,180 @@
+--// Created By CDHW/Kohrynth
+--// Untitled Boxing Game | Auto Dodge
+--// Edited: dodge đúng hướng tay kẻ địch
+
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+
+local lastPerfect
+local lastDirection
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+local function getState()
+    local states = game.Workspace:FindFirstChild("States")
+
+    if states then
+        return states:FindFirstChild(player.Name)
+    end
+end
+
+-- Tính hướng dash dựa trên vị trí tương đối player/enemy
+local function getDashDirection(character, enemy)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = enemy:FindFirstChild("HumanoidRootPart")
+
+    if not root or not eroot then
+        return nil
+    end
+
+    -- Vector từ enemy tới player, ép về mặt phẳng ngang
+    local toPlayer = root.Position - eroot.Position
+    toPlayer = Vector3.new(toPlayer.X, 0, toPlayer.Z)
+
+    if toPlayer.Magnitude < 0.01 then
+        return nil
+    end
+
+    toPlayer = toPlayer.Unit
+
+    -- Trục phải và trục trước của enemy trong world space
+    local enemyRight = eroot.CFrame.RightVector
+    enemyRight = Vector3.new(enemyRight.X, 0, enemyRight.Z).Unit
+
+    local enemyForward = eroot.CFrame.LookVector
+    enemyForward = Vector3.new(enemyForward.X, 0, enemyForward.Z).Unit
+
+    -- Chiếu vị trí player lên trục của enemy
+    local sideDot = toPlayer:Dot(enemyRight)
+    local frontDot = toPlayer:Dot(enemyForward)
+
+    -- Player ở bên phải enemy -> dash sang phải, ngược lại sang trái
+    -- Player ở trước mặt enemy -> dash ra sau, ngược lại tiến tới
+    if math.abs(sideDot) >= math.abs(frontDot) then
+        return sideDot > 0 and "Right" or "Left"
+    else
+        return frontDot > 0 and "Backward" or "Forward"
+    end
+end
+
+local function dodge()
+    local character = player.Character
+
+    if not character then
+        lastPerfect = nil
+        lastDirection = nil
+        return
+    end
+
+    local perfect = character:GetAttribute("Perfect")
+
+    if perfect == nil then
+        lastPerfect = nil
+        lastDirection = nil
+        return
+    end
+
+    local direction = character:GetAttribute("NeededDirection")
+
+    if direction ~= "Left" and direction ~= "Right" and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local state = getState()
+
+    if not state then
+        return
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return
+    end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+    local dashing = occupied:FindFirstChild("Dashing")
+
+    if not locked or not locked.Value then
+        return
+    end
+
+    if dashing and dashing.Value then
+        return
+    end
+
+    local enemy = locked.Value
+
+    if enemy:GetAttribute("IsFeinting") == true or enemy:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = enemy:FindFirstChild("HumanoidRootPart")
+
+    if root and eroot and (root.Position - eroot.Position).Magnitude > 6 then
+        return
+    end
+
+    local events = game.ReplicatedStorage:FindFirstChild("Events")
+    local dash = events and events:FindFirstChild("ForceDash")
+
+    if not dash then
+        return
+    end
+
+    -- Ưu tiên hướng tính từ vị trí tương đối, fallback về attribute
+    local computedDir = getDashDirection(character, enemy)
+    local finalDir = computedDir or direction
+
+    -- Chống spam: bỏ qua nếu trigger không đổi
+    if perfect == lastPerfect and finalDir == lastDirection then
+        return
+    end
+
+    lastPerfect = perfect
+    lastDirection = finalDir
+
+    dash:Fire({Direction = finalDir})
+
+    -- Retry frame kế tiếp
+    RS.Heartbeat:Once(function()
+        local currentCharacter = player.Character
+
+        if currentCharacter ~= character then
+            return
+        end
+
+        local currentState = getState()
+        local currentOccupied = currentState and currentState:FindFirstChild("Occupied")
+        local currentDashing = currentOccupied and currentOccupied:FindFirstChild("Dashing")
+
+        local currentPerfect = character:GetAttribute("Perfect")
+        local currentDirection = character:GetAttribute("NeededDirection")
+
+        if currentPerfect == perfect
+            and currentDirection == direction
+            and (not currentDashing or currentDashing.Value == false) then
+
+            local retryDir = getDashDirection(character, enemy) or finalDir
+            dash:Fire({Direction = retryDir})
+        end
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function()
+    if player.Character then
+        dodge()
+    end
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+    lastDirection = nil
+end)

@@ -1,0 +1,139 @@
+--// Created By CDHW/Kohrynth
+--// Untitled Boxing Game | Auto Dodge (FIX HƯỚNG NÉ - dùng remote thật BridgeNet2)
+
+local Players = game:GetService("Players")
+local RS      = game:GetService("RunService")
+local player  = Players.LocalPlayer
+
+-- ============ CẤU HÌNH ============
+local CFG = {
+    MaxDistance  = 6,                    -- khoảng cách tối đa tới địch
+    Cooldown     = 0.05,                 -- chống spam né
+    DashConst    = 0.1750034393596584,   -- hằng số trong packet thật
+    Wrapper      = 1,                    -- 1 = {packet,"$"}  |  2 = {130,"J",packet,"$"}
+    TargetIsChar = true,                 -- [2] = nhân vật mình (nếu né ra trước, đổi false)
+}
+-- ==================================
+
+local remote = game.ReplicatedStorage:WaitForChild("BridgeNet2"):WaitForChild("dataRemoteEvent")
+
+local lastPerfect, lastFire = nil, 0
+
+-- đổi tên hướng -> vector thế giới theo mặt nhân vật (đang lock-on nên mặt hướng về địch)
+local function worldDir(char, name)
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    local cf = root.CFrame
+    local v
+    if name == "Left"     then v = -cf.RightVector
+    elseif name == "Right" then v = cf.RightVector
+    elseif name == "Forward" then v = cf.LookVector
+    elseif name == "Backward" then v = -cf.LookVector end
+    if not v then return nil end
+    v = Vector3.new(v.X, 0, v.Z)
+    if v.Magnitude > 0 then v = v.Unit end
+    return v
+end
+
+local function fireDash(dirName, vec, char, enemy)
+    local packet = {
+        [1] = { vec, dirName, CFG.DashConst },
+        [2] = CFG.TargetIsChar and char or enemy,
+        [5] = true,
+        [6] = false,
+        [7] = vec,
+        [9] = tick(),
+    }
+    if CFG.Wrapper == 1 then
+        remote:FireServer({ packet, "$" })
+    else
+        remote:FireServer({ 130, "J", packet, "$" })
+    end
+end
+
+local function getState()
+    local states = workspace:FindFirstChild("States")
+    if states then
+        return states:FindFirstChild(player.Name)
+    end
+end
+
+local function dodge()
+    local character = player.Character
+    if not character then return end
+
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+
+    local perfect = character:GetAttribute("Perfect")
+    if perfect == nil or perfect == lastPerfect then return end
+
+    local direction = character:GetAttribute("NeededDirection")
+    if direction ~= "Left" and direction ~= "Right" and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local now = os.clock()
+    if now - lastFire < CFG.Cooldown then return end
+
+    local state = getState()
+    if not state then return end
+
+    local occupied = state:FindFirstChild("Occupied")
+    if not occupied then return end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+    local dashing = occupied:FindFirstChild("Dashing")
+
+    if not locked or not locked.Value then return end
+    if dashing and dashing.Value then return end
+
+    local enemy = locked.Value
+    if not enemy or not enemy.Parent then return end
+
+    if enemy:GetAttribute("IsFeinting") == true or enemy:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root  = character:FindFirstChild("HumanoidRootPart")
+    local eroot = enemy:FindFirstChild("HumanoidRootPart")
+    if not root or not eroot then return end
+    if (root.Position - eroot.Position).Magnitude > CFG.MaxDistance then return end
+
+    local vec = worldDir(character, direction)
+    if not vec then return end
+
+    lastPerfect = perfect
+    lastFire = now
+
+    fireDash(direction, vec, character, enemy)
+end
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function()
+    if player.Character then
+        local ok, err = pcall(dodge)
+        if not ok then warn("[AutoDodge] " .. tostring(err)) end
+    end
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+end)
+
+-- ====== TEST TAY ======
+-- Gõ trong console:  _G.testDash("Left")   hoặc   _G.testDash("Right")
+_G.testDash = function(d)
+    local c = player.Character
+    if not c then return end
+    fireDash(d, worldDir(c, d), c, c)
+end
+
+print("[AutoDodge] đã bật. Test: _G.testDash(\"Left\") / _G.testDash(\"Right\")")

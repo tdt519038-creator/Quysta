@@ -1,0 +1,162 @@
+--// Created By CDHW/Kohrynth (Modified - BridgeNet2 DirectDodge)
+--// Untitled Boxing Game | Auto Dodge - Đúng hướng trái/phải
+
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+local ReplicatedStorage = game.ReplicatedStorage
+
+local lastPerfect
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+-- Remote đúng từ log của bạn
+local dataRemote = ReplicatedStorage:WaitForChild("BridgeNet2"):WaitForChild("dataRemoteEvent")
+
+local function getState()
+    local states = game.Workspace:FindFirstChild("States")
+    if states then
+        return states:FindFirstChild(player.Name)
+    end
+end
+
+-- Tính Vector3 hướng né dựa theo HumanoidRootPart.CFrame
+local function getDirectionVector(dirStr, character)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then return Vector3.new(0, 0, -1) end
+
+    local cf = root.CFrame
+    local map = {
+        Left     = -cf.RightVector,
+        Right    =  cf.RightVector,
+        Forward  = -cf.LookVector,
+        Backward =  cf.LookVector,
+    }
+
+    local vec = map[dirStr]
+    if not vec then return Vector3.new(0, 0, -1) end
+
+    -- Flatten Y rồi normalize như log thực tế
+    return Vector3.new(vec.X, 0, vec.Z).Unit
+end
+
+-- Lấy character instance trong folder Live (đúng theo log)
+local function getLiveCharacter(character)
+    local live = game.Workspace:FindFirstChild("Live")
+    if live then
+        return live:FindFirstChild(player.Name) or character
+    end
+    return character
+end
+
+local function fireDash(dirStr, character)
+    local vec = getDirectionVector(dirStr, character)
+    local liveChar = getLiveCharacter(character)
+
+    local args = {
+        [1] = {
+            [1] = {
+                [1] = {
+                    [1] = vec,
+                    [2] = dirStr,      -- "Left" / "Right" / "Forward" / "Backward"
+                    [3] = 0.1750034393596584
+                },
+                [2] = liveChar,        -- workspace.Live.PlayerName
+                [5] = true,
+                [6] = false,
+                [7] = vec,             -- trùng với [1]
+                [9] = tick()           -- timestamp thực
+            },
+            [2] = "$"
+        }
+    }
+
+    dataRemote:FireServer(unpack(args))
+end
+
+local function dodge()
+    local character = player.Character
+    if not character then return end
+
+    local perfect = character:GetAttribute("Perfect")
+    if perfect == nil or perfect == lastPerfect then return end
+
+    local direction = character:GetAttribute("NeededDirection")
+    if direction ~= "Left" and direction ~= "Right"
+        and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local state = getState()
+    if not state then return end
+
+    local occupied = state:FindFirstChild("Occupied")
+    if not occupied then return end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+    local dashing = occupied:FindFirstChild("Dashing")
+
+    if not locked or not locked.Value then return end
+    if dashing and dashing.Value then return end
+
+    local enemy = locked.Value
+
+    if enemy:GetAttribute("IsFeinting") == true
+        or enemy:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root  = character:FindFirstChild("HumanoidRootPart")
+    local eroot = enemy:FindFirstChild("HumanoidRootPart")
+    if root and eroot and (root.Position - eroot.Position).Magnitude > 6 then
+        return
+    end
+
+    lastPerfect = perfect
+
+    -- Bắn lần 1
+    fireDash(direction, character)
+
+    -- Retry lần 2 sau 1 frame nếu chưa dash
+    RS.Heartbeat:Once(function()
+        local s2  = getState()
+        local o2  = s2 and s2:FindFirstChild("Occupied")
+        local d2  = o2 and o2:FindFirstChild("Dashing")
+
+        if player.Character == character
+            and character:GetAttribute("Perfect") == perfect
+            and (not d2 or d2.Value == false) then
+            fireDash(direction, character)
+        end
+    end)
+
+    -- Retry lần 3 sau thêm 1 frame
+    RS.Heartbeat:Once(function()
+        local s3  = getState()
+        local o3  = s3 and s3:FindFirstChild("Occupied")
+        local d3  = o3 and o3:FindFirstChild("Dashing")
+
+        if player.Character == character
+            and character:GetAttribute("Perfect") == perfect
+            and (not d3 or d3.Value == false) then
+            fireDash(direction, character)
+        end
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function()
+    if player.Character then
+        dodge()
+    end
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+end)
+
+print("Auto Dodge loaded - BridgeNet2 DirectDodge")

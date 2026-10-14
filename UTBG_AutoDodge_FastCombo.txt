@@ -1,0 +1,146 @@
+--// Created By CDHW/Kohrynth
+--// Untitled Boxing Game | Auto Dodge
+--// Modified: Fast consecutive attack detection (reduced inter-dodge cooldown)
+
+local player = game.Players.LocalPlayer
+local RS = game.RunService
+
+local lastPerfect
+local lastDodgeTime = 0         -- timestamp của lần dodge cuối
+local DODGE_COOLDOWN = 0.08     -- 80ms cooldown (thay vì chờ Perfect thay đổi)
+
+if getgenv().dodge then
+    getgenv().dodge:Disconnect()
+end
+
+if getgenv().dodgeChar then
+    getgenv().dodgeChar:Disconnect()
+end
+
+local function getState()
+    local states = game.Workspace:FindFirstChild("States")
+
+    if states then
+        return states:FindFirstChild(player.Name)
+    end
+end
+
+local function dodge()
+    local character = player.Character
+
+    if not character then
+        return
+    end
+
+    local perfect = character:GetAttribute("Perfect")
+
+    if perfect == nil then
+        return
+    end
+
+    local now = tick()
+
+    -- Nếu Perfect chưa đổi VÀ cooldown chưa hết → bỏ qua (tránh spam)
+    -- Nếu Perfect đổi OR cooldown đã hết sau lần dodge trước → cho phép dodge lại
+    local perfectChanged = (perfect ~= lastPerfect)
+    local cooldownExpired = (now - lastDodgeTime) >= DODGE_COOLDOWN
+
+    if not perfectChanged and not cooldownExpired then
+        return
+    end
+
+    -- Nếu cooldown hết nhưng Perfect vẫn như cũ (đòn đánh xen kẽ nhanh),
+    -- chỉ cho phép nếu đã qua đủ thời gian để tránh double-fire trên cùng 1 đòn
+    if not perfectChanged and cooldownExpired then
+        -- Kiểm tra xem có thực sự là đòn mới không (perfect vẫn đang active)
+        if perfect == false or perfect == nil then
+            return
+        end
+    end
+
+    local direction = character:GetAttribute("NeededDirection")
+
+    if direction ~= "Left" and direction ~= "Right" and direction ~= "Backward" and direction ~= "Forward" then
+        return
+    end
+
+    local state = getState()
+
+    if not state then
+        return
+    end
+
+    local occupied = state:FindFirstChild("Occupied")
+
+    if not occupied then
+        return
+    end
+
+    local locked = occupied:FindFirstChild("LockedOn")
+    local dashing = occupied:FindFirstChild("Dashing")
+
+    if not locked or not locked.Value then
+        return
+    end
+
+    if dashing and dashing.Value then
+        return
+    end
+
+    local enemy = locked.Value
+
+    if enemy:GetAttribute("IsFeinting") == true or enemy:GetAttribute("LocalIsFeinting") == true then
+        return
+    end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local eroot = enemy:FindFirstChild("HumanoidRootPart")
+
+    if root and eroot and (root.Position - eroot.Position).Magnitude > 6 then
+        return
+    end
+
+    local events = game.ReplicatedStorage:FindFirstChild("Events")
+    local dash = events and events:FindFirstChild("ForceDash")
+
+    if not dash then
+        return
+    end
+
+    -- Cập nhật cả hai tracker
+    lastPerfect = perfect
+    lastDodgeTime = now
+
+    dash:Fire({Direction = direction})
+
+    RS.Heartbeat:Once(function()
+        local state = getState()
+        local occupied = state and state:FindFirstChild("Occupied")
+        local dashing = occupied and occupied:FindFirstChild("Dashing")
+
+        if player.Character == character and character:GetAttribute("Perfect") == perfect and (not dashing or dashing.Value == false) then
+            dash:Fire({Direction = direction})
+        end
+    end)
+
+    RS.Heartbeat:Once(function()
+        local state = getState()
+        local occupied = state and state:FindFirstChild("Occupied")
+        local dashing = occupied and occupied:FindFirstChild("Dashing")
+
+        if player.Character == character and character:GetAttribute("Perfect") == perfect and (not dashing or dashing.Value == false) then
+            dash:Fire({Direction = direction})
+        end
+    end)
+end
+
+getgenv().dodge = RS.Heartbeat:Connect(function()
+    if player.Character then
+        dodge()
+    end
+end)
+
+getgenv().dodgeChar = player.CharacterAdded:Connect(function()
+    lastPerfect = nil
+    lastDodgeTime = 0
+end)
